@@ -15,10 +15,8 @@ jobs:
         include:
           - os: macos-latest
             artifact: DailyScheduler-macOS
-            ext: app
           - os: windows-latest
             artifact: DailyScheduler-Windows
-            ext: exe
 
     runs-on: ${{ matrix.os }}
 
@@ -30,22 +28,31 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: pip install PySide6 pyinstaller
 
       # macOS build
       - name: Build macOS app
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --windowed --onefile --name DailyScheduler --icon AppIcon.icns daily_scheduler.py
+          pyinstaller --windowed --onefile --name DailyScheduler \
+            --icon AppIcon.icns \
+            --hidden-import PySide6.QtWidgets \
+            --hidden-import PySide6.QtCore \
+            --hidden-import PySide6.QtGui \
+            daily_scheduler.py
           cd dist
-          zip -r DailyScheduler-macOS.zip DailyScheduler.app
+          zip -r DailyScheduler-macOS.zip DailyScheduler.app || zip -r DailyScheduler-macOS.zip DailyScheduler
 
       # Windows build
       - name: Build Windows exe
         if: runner.os == 'Windows'
         run: |
-          pyinstaller --windowed --onefile --name DailyScheduler daily_scheduler.py
+          pyinstaller --windowed --onefile --name DailyScheduler `
+            --hidden-import PySide6.QtWidgets `
+            --hidden-import PySide6.QtCore `
+            --hidden-import PySide6.QtGui `
+            daily_scheduler.py
 
       # Upload artifacts
       - name: Upload macOS artifact
