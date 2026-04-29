@@ -242,6 +242,7 @@ def add_task(d, title, parent_id=None):
             "INSERT INTO tasks (date, title, parent_id, sort_order) VALUES (?, ?, ?, ?)",
             (d, title.strip(), parent_id, sort_order),
         )
+        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
 
 def update_task_title(tid, title):
@@ -501,7 +502,7 @@ class SchedulerApp(QMainWindow):
 
         # ── 왼쪽: Tasks ──
         left = QWidget()
-        left.setStyleSheet(f"QWidget#left {{ border: 1px solid {C['border']}; }}")
+        left.setStyleSheet("")
         left.setObjectName("left")
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -520,16 +521,10 @@ class SchedulerApp(QMainWindow):
         lh_layout.addWidget(self.task_count_label)
         left_layout.addWidget(lh)
 
-        div1 = QFrame()
-        div1.setFrameShape(QFrame.Shape.HLine)
-        div1.setStyleSheet(f"color: {C['divider']};")
-        div1.setFixedHeight(1)
-        div1.setContentsMargins(18, 8, 18, 0)
-        left_layout.addWidget(div1)
 
         # 입력
         input_layout = QHBoxLayout()
-        input_layout.setContentsMargins(18, 10, 18, 10)
+        input_layout.setContentsMargins(18, 16, 18, 16)
         self.task_entry = QLineEdit()
         self.task_entry.returnPressed.connect(self.on_add_task)
         add_btn = QPushButton("+")
@@ -554,7 +549,7 @@ class SchedulerApp(QMainWindow):
 
         # ── 오른쪽: Notes ──
         right = QWidget()
-        right.setStyleSheet(f"QWidget#right {{ border: 1px solid {C['border']}; }}")
+        right.setStyleSheet("")
         right.setObjectName("right")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -587,11 +582,6 @@ class SchedulerApp(QMainWindow):
 
         right_layout.addWidget(rh)
 
-        div2 = QFrame()
-        div2.setFrameShape(QFrame.Shape.HLine)
-        div2.setStyleSheet(f"color: {C['divider']};")
-        div2.setFixedHeight(1)
-        right_layout.addWidget(div2)
 
         # 메모 텍스트
         self.note_text = QTextEdit()
@@ -711,11 +701,13 @@ class SchedulerApp(QMainWindow):
                 self.task_list_layout.addWidget(add_child_row)
 
                 # 구분선 (부모 그룹 간)
+                self.task_list_layout.addSpacing(8)
                 div = QFrame()
                 div.setFrameShape(QFrame.Shape.HLine)
                 div.setStyleSheet(f"color: {C['divider']};")
                 div.setFixedHeight(1)
                 self.task_list_layout.addWidget(div)
+                self.task_list_layout.addSpacing(8)
 
         self.task_list_layout.addStretch()
 
@@ -729,7 +721,7 @@ class SchedulerApp(QMainWindow):
         row.setStyleSheet(f"QWidget {{ background: transparent; }} QWidget:hover {{ background: {C['hover']}; }}")
         row_layout = QHBoxLayout(row)
         left_margin = 18 + (30 * indent)
-        row_layout.setContentsMargins(left_margin, 5, 18, 5)
+        row_layout.setContentsMargins(left_margin, 9, 18, 9)
 
         # 드래그 핸들
         drag_handle = QPushButton("≡")
@@ -792,6 +784,9 @@ class SchedulerApp(QMainWindow):
 
         self.task_list_layout.addWidget(row)
 
+        if getattr(self, '_auto_edit_tid', None) == tid:
+            self._start_inline_edit(tid, title, lbl, row_layout)
+
     def _start_inline_edit(self, tid, title, label, row_layout):
         """라벨을 QLineEdit으로 교체해서 인라인 편집"""
         edit = QLineEdit(title)
@@ -819,9 +814,10 @@ class SchedulerApp(QMainWindow):
 
     def _add_child_inline(self, parent_id):
         """하위 태스크 인라인 추가"""
-        add_task(self.current_date, self._tx("new_child"), parent_id=parent_id)
+        new_id = add_task(self.current_date, self._tx("new_child"), parent_id=parent_id)
+        self._auto_edit_tid = new_id
         self._refresh_tasks()
-        # TODO: 바로 편집 모드 진입 가능
+        self._auto_edit_tid = None
 
     # ── 드래그 앤 드롭 (순서 변경 + 부모 변경) ──────
     def _drag_start(self, tid, index, event):
