@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QSlider, QScrollArea,
     QFrame, QFileDialog, QMessageBox, QDialog,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QShortcut, QKeySequence
 
 # ────────────────────────────────────────────────
@@ -33,7 +33,7 @@ I18N = {
         "opacity": "투명도",
         "today": "오늘",
         "yesterday": "어제",
-        "go_today": "오늘로",
+        "go_today": "↩ 오늘",
         "add_placeholder": "새로운 할 일을 입력하세요...",
         "no_tasks": "할 일이 없습니다",
         "no_tasks_hint": "위 입력창에서 추가해보세요",
@@ -47,6 +47,10 @@ I18N = {
         "no_records": "기록된 날짜가 없습니다.",
         "done_count": "완료",
         "lang_label": "언어",
+        "days_ago": "일 전",
+        "days_later": "일 후",
+        "weeks_ago": "주 전",
+        "weeks_later": "주 후",
         "weekdays": ["월", "화", "수", "목", "금", "토", "일"],
     },
     "en": {
@@ -57,7 +61,7 @@ I18N = {
         "opacity": "Opacity",
         "today": "Today",
         "yesterday": "Yesterday",
-        "go_today": "Go to Today",
+        "go_today": "↩ Today",
         "add_placeholder": "Add a new task...",
         "no_tasks": "No tasks yet",
         "no_tasks_hint": "Add one above to get started",
@@ -71,6 +75,10 @@ I18N = {
         "no_records": "No records found.",
         "done_count": "done",
         "lang_label": "Lang",
+        "days_ago": "d ago",
+        "days_later": "d later",
+        "weeks_ago": "w ago",
+        "weeks_later": "w later",
         "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
     },
 }
@@ -377,9 +385,19 @@ class SchedulerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Daily Scheduler")
-        self.resize(1060, 700)
-        self.setMinimumSize(900, 580)
+        self.setMinimumSize(800, 560)
         self.setStyleSheet(STYLESHEET)
+
+        # 창 크기/위치 복원
+        geo = get_meta("window_geometry", "")
+        if geo:
+            try:
+                x, y, w, h = map(int, geo.split(","))
+                self.setGeometry(x, y, w, h)
+            except Exception:
+                self.resize(1060, 700)
+        else:
+            self.resize(1060, 700)
 
         # 언어 설정 로드
         saved_lang = get_meta("lang", "ko")
@@ -424,7 +442,8 @@ class SchedulerApp(QMainWindow):
         topbar = QWidget()
         topbar.setFixedHeight(50)
         tb_layout = QHBoxLayout(topbar)
-        tb_layout.setContentsMargins(24, 8, 24, 8)
+        tb_layout.setContentsMargins(24, 8, 8, 8)
+        tb_layout.setSpacing(0)
 
         # 날짜 네비게이션
         self.prev_btn = QPushButton("<")
@@ -440,24 +459,52 @@ class SchedulerApp(QMainWindow):
         self.next_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; border: none; color: {C['dim2']};")
         self.next_btn.clicked.connect(self.next_day)
 
-        self.today_badge = QPushButton()
-        self.today_badge.setStyleSheet(f"border: none; color: {C['blue']}; font-size: 11px;")
-        self.today_badge.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.today_badge.clicked.connect(self.go_today)
+        self.today_badge = QLabel()
+        self.today_badge.setStyleSheet(f"color: {C['blue']}; font-size: 11px;")
+
+        self.go_today_btn = QPushButton("↩ 오늘")
+        self.go_today_btn.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
+        self.go_today_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.go_today_btn.clicked.connect(self.go_today)
+        self.go_today_btn.hide()
 
         tb_layout.addWidget(self.prev_btn)
+        tb_layout.addSpacing(6)
         tb_layout.addWidget(self.date_label)
+        tb_layout.addSpacing(6)
         tb_layout.addWidget(self.next_btn)
+        tb_layout.addSpacing(10)
         tb_layout.addWidget(self.today_badge)
+        tb_layout.addSpacing(8)
+        tb_layout.addWidget(self.go_today_btn)
         tb_layout.addStretch()
 
-        # 오른쪽 컨트롤
-        self.lang_label = QLabel()
-        self.lang_label.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
-        self.lang_btn = QPushButton()
-        self.lang_btn.setStyleSheet(f"border: none; color: {C['dim2']}; font-size: 11px;")
-        self.lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lang_btn.clicked.connect(self._toggle_lang)
+        # 오른쪽 컨트롤 — 언어 토글
+        lang_toggle = QWidget()
+        lang_toggle_layout = QHBoxLayout(lang_toggle)
+        lang_toggle_layout.setContentsMargins(0, 0, 0, 0)
+        lang_toggle_layout.setSpacing(4)
+
+        self.lang_ko_btn = QPushButton("한글")
+        self.lang_ko_btn.setFlat(True)
+        self.lang_ko_btn.setFixedSize(40, 22)
+        self.lang_ko_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lang_ko_btn.clicked.connect(lambda: self._set_lang("ko"))
+
+        lang_sep = QLabel("·")
+        lang_sep.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
+        lang_sep.setFixedWidth(10)
+        lang_sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.lang_en_btn = QPushButton("EN")
+        self.lang_en_btn.setFlat(True)
+        self.lang_en_btn.setFixedSize(36, 22)
+        self.lang_en_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lang_en_btn.clicked.connect(lambda: self._set_lang("en"))
+
+        lang_toggle_layout.addWidget(self.lang_ko_btn)
+        lang_toggle_layout.addWidget(lang_sep)
+        lang_toggle_layout.addWidget(self.lang_en_btn)
 
         self.opacity_title = QLabel()
         self.opacity_title.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
@@ -473,16 +520,18 @@ class SchedulerApp(QMainWindow):
         self.opacity_label.setFixedWidth(35)
 
         self.hist_btn = QPushButton()
+        self.hist_btn.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
         self.hist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.hist_btn.clicked.connect(self.show_history)
 
-        tb_layout.addWidget(self.lang_label)
-        tb_layout.addWidget(self.lang_btn)
-        tb_layout.addSpacing(12)
+        tb_layout.addWidget(lang_toggle)
+        tb_layout.addSpacing(16)
         tb_layout.addWidget(self.opacity_title)
+        tb_layout.addSpacing(6)
         tb_layout.addWidget(self.opacity_slider)
+        tb_layout.addSpacing(4)
         tb_layout.addWidget(self.opacity_label)
-        tb_layout.addSpacing(12)
+        tb_layout.addSpacing(16)
         tb_layout.addWidget(self.hist_btn)
 
         main_layout.addWidget(topbar)
@@ -539,6 +588,7 @@ class SchedulerApp(QMainWindow):
         # 할 일 리스트 (스크롤)
         self.task_scroll = QScrollArea()
         self.task_scroll.setWidgetResizable(True)
+        self.task_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.task_list_widget = QWidget()
         self.task_list_layout = QVBoxLayout(self.task_list_widget)
         self.task_list_layout.setContentsMargins(0, 0, 0, 0)
@@ -599,6 +649,25 @@ class SchedulerApp(QMainWindow):
 
         # 초기 텍스트
         self._apply_lang_texts()
+        QTimer.singleShot(300, self._fix_translatable_widths)
+
+    # ── 번역 위젯 고정 너비 ─────────────────────
+    def _fix_translatable_widths(self):
+        """모든 언어 텍스트 중 가장 긴 것에 맞춰 위젯 고정 너비 설정 (레이아웃 안정화)
+        QTimer 300ms 후 실행 → 폰트 stylesheet가 완전히 적용된 뒤 fontMetrics() 사용.
+        date_label/today_badge는 크기 변동이 작아 overflow 방지를 위해 고정 너비 미적용.
+        """
+        for widget, key, pad in [
+            (self.tasks_title,   "tasks",   8),
+            (self.notes_title,   "notes",   8),
+            (self.opacity_title, "opacity", 8),
+            (self.hist_btn,      "history", 32),
+            (self.save_btn,      "save",    16),
+            (self.go_today_btn,  "go_today", 16),
+        ]:
+            fm = widget.fontMetrics()
+            max_w = max(fm.horizontalAdvance(lang[key]) for lang in I18N.values())
+            widget.setFixedWidth(max_w + pad)
 
     # ── 다국어 텍스트 적용 ───────────────────────
     def _apply_lang_texts(self):
@@ -609,12 +678,17 @@ class SchedulerApp(QMainWindow):
         self.opacity_title.setText(self._tx("opacity"))
         self.export_btn.setText(self._tx("export_md"))
         self.save_btn.setText(self._tx("save"))
-        self.lang_label.setText(self._tx("lang_label"))
-        self.lang_btn.setText("EN" if self.lang == "ko" else "KO")
+        active = f"border: none; color: {C['text']}; font-size: 11px;"
+        inactive = f"border: none; color: {C['dim3']}; font-size: 11px;"
+        self.lang_ko_btn.setStyleSheet(active if self.lang == "ko" else inactive)
+        self.lang_en_btn.setStyleSheet(active if self.lang == "en" else inactive)
         self.task_entry.setPlaceholderText(self._tx("add_placeholder"))
+        self.go_today_btn.setText(self._tx("go_today"))
 
-    def _toggle_lang(self):
-        self.lang = "en" if self.lang == "ko" else "ko"
+    def _set_lang(self, lang):
+        if self.lang == lang:
+            return
+        self.lang = lang
         set_meta("lang", self.lang)
         self._apply_lang_texts()
         self._update_date_label()
@@ -637,15 +711,33 @@ class SchedulerApp(QMainWindow):
         wd = self.t["weekdays"][d.weekday()]
         self.date_label.setText(f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})")
 
-        if self.current_date == self.today_str:
+        delta = (d - date.today()).days
+        if delta == 0:
             self.today_badge.setText(self._tx("today"))
-            self.today_badge.setStyleSheet(f"border: none; color: {C['blue']}; font-size: 11px;")
-        elif self.current_date == (date.today() - timedelta(days=1)).isoformat():
+            self.today_badge.setStyleSheet(f"color: {C['blue']}; font-size: 11px;")
+            self.go_today_btn.hide()
+        elif delta == -1:
             self.today_badge.setText(self._tx("yesterday"))
-            self.today_badge.setStyleSheet(f"border: none; color: {C['amber']}; font-size: 11px;")
+            self.today_badge.setStyleSheet(f"color: {C['amber']}; font-size: 11px;")
+            self.go_today_btn.show()
+        elif delta < 0:
+            n = abs(delta)
+            if n >= 14:
+                label = f"{n // 7}{self._tx('weeks_ago')}"
+            else:
+                label = f"{n}{self._tx('days_ago')}"
+            self.today_badge.setText(label)
+            self.today_badge.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
+            self.go_today_btn.show()
         else:
-            self.today_badge.setText(self._tx("go_today"))
-            self.today_badge.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
+            n = delta
+            if n >= 14:
+                label = f"{n // 7}{self._tx('weeks_later')}"
+            else:
+                label = f"{n}{self._tx('days_later')}"
+            self.today_badge.setText(label)
+            self.today_badge.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
+            self.go_today_btn.show()
 
     def _refresh_tasks(self):
         # 기존 위젯 제거
@@ -686,8 +778,9 @@ class SchedulerApp(QMainWindow):
                                           index=j, total=len(task["children"]))
                 # 하위 태스크 추가 버튼
                 add_child_row = QWidget()
+                add_child_row.setFixedHeight(26)
                 acr_layout = QHBoxLayout(add_child_row)
-                acr_layout.setContentsMargins(48, 2, 18, 2)
+                acr_layout.setContentsMargins(48, 0, 18, 0)
                 add_child_btn = QPushButton(self._tx("add_child"))
                 add_child_btn.setStyleSheet(
                     f"border: none; color: {C['dim3']}; font-size: 11px; text-align: left; padding: 2px 0;"
@@ -1096,6 +1189,8 @@ class SchedulerApp(QMainWindow):
         self._save_note_now()
         set_meta("opacity", f"{self._opacity:.2f}")
         set_meta("lang", self.lang)
+        g = self.geometry()
+        set_meta("window_geometry", f"{g.x()},{g.y()},{g.width()},{g.height()}")
         event.accept()
 
 
