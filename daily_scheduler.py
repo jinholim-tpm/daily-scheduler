@@ -245,6 +245,11 @@ class SchedulerApp:
         self.current_date = self.today_str
         self._note_save_after_id = None
 
+        # Tk 9.0 + macOS 26 버그 우회:
+        # Command+키 조합의 keysym이 '??'로 깨져서 <Command-c> 바인딩이 동작하지 않음
+        # state=0x0008(Meta/Command) + char 값으로 직접 판별
+        self.root.bind_all("<KeyPress>", self._handle_command_keys)
+
         self._build_ui()
         self.refresh_all()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -425,6 +430,7 @@ class SchedulerApp:
             highlightthickness=0,
         )
         self.note_text.pack(fill=tk.BOTH, expand=True)
+
         self.note_text.bind("<<Modified>>", self._on_note_modified)
 
         # ── 상태바 ──
@@ -633,6 +639,87 @@ class SchedulerApp:
             self.root.after_cancel(self._note_save_after_id)
         self._note_save_after_id = self.root.after(1000, self._save_note_now)
         self.note_text.edit_modified(False)
+
+    # ── Command 키 우회 (Tk 9.0 + macOS 26 버그) ──
+    def _handle_command_keys(self, event):
+        """keysym이 깨지는 버그 우회: state와 char로 Command 조합 판별"""
+        if not (event.state & 0x8):  # Command/Meta 키가 눌려있지 않으면 무시
+            return
+        widget = self.root.focus_get()
+        if widget is None:
+            return
+
+        char = event.char.lower()
+
+        if char == 'c':
+            # Copy
+            try:
+                if isinstance(widget, tk.Text):
+                    text = widget.get("sel.first", "sel.last")
+                elif isinstance(widget, tk.Entry) and widget.selection_present():
+                    text = widget.selection_get()
+                else:
+                    return "break"
+                widget.clipboard_clear()
+                widget.clipboard_append(text)
+            except tk.TclError:
+                pass
+            return "break"
+
+        elif char == 'v':
+            # Paste
+            try:
+                text = widget.clipboard_get()
+                if isinstance(widget, tk.Text):
+                    try:
+                        widget.delete("sel.first", "sel.last")
+                    except tk.TclError:
+                        pass
+                    widget.insert("insert", text)
+                elif isinstance(widget, tk.Entry):
+                    if widget.selection_present():
+                        widget.delete("sel.first", "sel.last")
+                    widget.insert("insert", text)
+            except tk.TclError:
+                pass
+            return "break"
+
+        elif char == 'x':
+            # Cut
+            try:
+                if isinstance(widget, tk.Text):
+                    text = widget.get("sel.first", "sel.last")
+                    widget.clipboard_clear()
+                    widget.clipboard_append(text)
+                    widget.delete("sel.first", "sel.last")
+                elif isinstance(widget, tk.Entry) and widget.selection_present():
+                    text = widget.selection_get()
+                    widget.clipboard_clear()
+                    widget.clipboard_append(text)
+                    widget.delete("sel.first", "sel.last")
+            except tk.TclError:
+                pass
+            return "break"
+
+        elif char == 'a':
+            # Select All
+            if isinstance(widget, tk.Text):
+                widget.tag_add("sel", "1.0", "end")
+            elif isinstance(widget, tk.Entry):
+                widget.select_range(0, tk.END)
+                widget.icursor(tk.END)
+            return "break"
+
+        elif char == 'z':
+            # Undo (Cmd+Z) / Redo (Cmd+Shift+Z)
+            try:
+                if event.state & 0x1:  # Shift
+                    widget.edit_redo()
+                else:
+                    widget.edit_undo()
+            except (tk.TclError, AttributeError):
+                pass
+            return "break"
 
     def _save_note_now(self):
         content = self.note_text.get("1.0", "end-1c")
