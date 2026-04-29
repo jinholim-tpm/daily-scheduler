@@ -8,11 +8,18 @@ Daily Scheduler - 글래스모피즘 데일리 스케줄러 GUI
 - 다국어 지원 (한/영)
 """
 
-import tkinter as tk
-from tkinter import messagebox, filedialog
+import sys
 import sqlite3
 from datetime import date, timedelta, datetime
 from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QTextEdit, QSlider, QScrollArea,
+    QFrame, QFileDialog, QMessageBox, QDialog, QSizePolicy, QSpacerItem,
+)
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QFont, QColor, QShortcut, QKeySequence, QIcon
 
 # ────────────────────────────────────────────────
 # 다국어
@@ -33,6 +40,7 @@ I18N = {
         "carried_over": "미완료 {n}건을 이월했습니다",
         "saved": "저장됨",
         "export_md": "MD",
+        "save": "저장",
         "export_success": "내보내기 완료: {path}",
         "no_records": "기록된 날짜가 없습니다.",
         "done_count": "완료",
@@ -54,6 +62,7 @@ I18N = {
         "carried_over": "Carried over {n} incomplete task(s)",
         "saved": "Saved",
         "export_md": "MD",
+        "save": "Save",
         "export_success": "Exported: {path}",
         "no_records": "No records found.",
         "done_count": "done",
@@ -214,15 +223,58 @@ def fetch_history_dates(limit=60):
 
 
 # ────────────────────────────────────────────────
+# 공통 스타일시트
+# ────────────────────────────────────────────────
+STYLESHEET = f"""
+QMainWindow, QWidget {{ background-color: {C["bg"]}; }}
+QLabel {{ color: {C["dim1"]}; font-family: "SF Pro Text", "Helvetica Neue", sans-serif; }}
+QPushButton {{
+    background: transparent; border: 1px solid {C["border"]};
+    color: {C["dim2"]}; padding: 4px 10px; border-radius: 4px;
+    font-family: "SF Pro Text", sans-serif; font-size: 11px;
+}}
+QPushButton:hover {{ color: {C["text"]}; border-color: {C["dim3"]}; }}
+QLineEdit {{
+    background-color: {C["input_bg"]}; color: {C["text"]};
+    border: 1px solid {C["border"]}; border-radius: 4px;
+    padding: 7px 12px; font-size: 13px;
+    font-family: "SF Pro Text", sans-serif;
+    selection-background-color: #2a3a5a;
+}}
+QTextEdit {{
+    background-color: {C["bg"]}; color: {C["dim1"]};
+    border: none; padding: 12px 18px;
+    font-family: "SF Mono", "Menlo", monospace; font-size: 13px;
+    selection-background-color: #2a3a5a; selection-color: {C["text"]};
+}}
+QSlider::groove:horizontal {{
+    height: 4px; background: {C["border"]}; border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {C["blue"]}; width: 12px; height: 12px;
+    margin: -4px 0; border-radius: 6px;
+}}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{
+    width: 6px; background: transparent;
+}}
+QScrollBar::handle:vertical {{
+    background: {C["dim3"]}; border-radius: 3px; min-height: 20px;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+"""
+
+
+# ────────────────────────────────────────────────
 # GUI
 # ────────────────────────────────────────────────
-class SchedulerApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Daily Scheduler")
-        self.root.geometry("1060x700")
-        self.root.minsize(900, 580)
-        self.root.configure(bg=C["bg"])
+class SchedulerApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Daily Scheduler")
+        self.resize(1060, 700)
+        self.setMinimumSize(900, 580)
+        self.setStyleSheet(STYLESHEET)
 
         # 언어 설정 로드
         saved_lang = get_meta("lang", "ko")
@@ -236,227 +288,236 @@ class SchedulerApp:
         except ValueError:
             self._opacity = 1.0
         self._opacity = max(0.3, min(1.0, self._opacity))
-        try:
-            self.root.attributes("-alpha", self._opacity)
-        except tk.TclError:
-            pass
+        self.setWindowOpacity(self._opacity)
 
         self.today_str = date.today().isoformat()
         self.current_date = self.today_str
-        self._note_save_after_id = None
-
-        # Tk 9.0 + macOS 26 버그 우회:
-        # Command+키 조합의 keysym이 '??'로 깨져서 <Command-c> 바인딩이 동작하지 않음
-        # state=0x0008(Meta/Command) + char 값으로 직접 판별
-        self.root.bind_all("<KeyPress>", self._handle_command_keys)
 
         self._build_ui()
+        self._setup_shortcuts()
         self.refresh_all()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _tx(self, key, **kwargs):
-        """현재 언어로 텍스트 반환"""
         text = self.t.get(key, key)
         if kwargs:
             text = text.format(**kwargs)
         return text
 
+    # ── 단축키 ───────────────────────────────────
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence.StandardKey.Save, self, self._save_note_now)
+
     # ── UI 빌드 ──────────────────────────────────
     def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
         # ── 상단 바 ──
-        topbar = tk.Frame(self.root, bg=C["bg"], padx=24, pady=10)
-        topbar.pack(fill=tk.X)
+        topbar = QWidget()
+        topbar.setFixedHeight(50)
+        tb_layout = QHBoxLayout(topbar)
+        tb_layout.setContentsMargins(24, 8, 24, 8)
 
         # 날짜 네비게이션
-        nav = tk.Frame(topbar, bg=C["bg"])
-        nav.pack(side=tk.LEFT)
+        self.prev_btn = QPushButton("<")
+        self.prev_btn.setFixedSize(30, 30)
+        self.prev_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; border: none; color: {C['dim2']};")
+        self.prev_btn.clicked.connect(self.prev_day)
 
-        self._make_nav_btn(nav, "<", self.prev_day).pack(side=tk.LEFT)
+        self.date_label = QLabel()
+        self.date_label.setStyleSheet(f"color: {C['text']}; font-size: 15px; font-weight: bold;")
 
-        self.date_label = tk.Label(nav, text="", fg=C["text"], bg=C["bg"],
-                                   font=("SF Pro Display", 15, "bold"))
-        self.date_label.pack(side=tk.LEFT, padx=10)
+        self.next_btn = QPushButton(">")
+        self.next_btn.setFixedSize(30, 30)
+        self.next_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; border: none; color: {C['dim2']};")
+        self.next_btn.clicked.connect(self.next_day)
 
-        self._make_nav_btn(nav, ">", self.next_day).pack(side=tk.LEFT)
+        self.today_badge = QPushButton()
+        self.today_badge.setStyleSheet(f"border: none; color: {C['blue']}; font-size: 11px;")
+        self.today_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.today_badge.clicked.connect(self.go_today)
 
-        self.today_badge = tk.Label(nav, text="", fg=C["blue"], bg=C["bg"],
-                                    font=("SF Pro Text", 9), cursor="pointinghand",
-                                    padx=10, pady=2)
-        self.today_badge.pack(side=tk.LEFT, padx=(14, 0))
-        self.today_badge.bind("<Button-1>", lambda e: self.go_today())
+        tb_layout.addWidget(self.prev_btn)
+        tb_layout.addWidget(self.date_label)
+        tb_layout.addWidget(self.next_btn)
+        tb_layout.addWidget(self.today_badge)
+        tb_layout.addStretch()
 
         # 오른쪽 컨트롤
-        right_controls = tk.Frame(topbar, bg=C["bg"])
-        right_controls.pack(side=tk.RIGHT)
+        self.lang_label = QLabel()
+        self.lang_label.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
+        self.lang_btn = QPushButton()
+        self.lang_btn.setStyleSheet(f"border: none; color: {C['dim2']}; font-size: 11px;")
+        self.lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lang_btn.clicked.connect(self._toggle_lang)
 
-        # 언어 전환
-        self.lang_label = tk.Label(right_controls, text="", fg=C["dim3"], bg=C["bg"],
-                                   font=("SF Pro Text", 9))
-        self.lang_label.pack(side=tk.LEFT, padx=(0, 4))
+        self.opacity_title = QLabel()
+        self.opacity_title.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
 
-        self.lang_btn = tk.Label(right_controls, text="", fg=C["dim2"], bg=C["bg"],
-                                 font=("SF Pro Text", 9), cursor="pointinghand")
-        self.lang_btn.pack(side=tk.LEFT, padx=(0, 16))
-        self.lang_btn.bind("<Button-1>", lambda e: self._toggle_lang())
-        self.lang_btn.bind("<Enter>", lambda e: self.lang_btn.config(fg=C["text"]))
-        self.lang_btn.bind("<Leave>", lambda e: self.lang_btn.config(fg=C["dim2"]))
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(30, 100)
+        self.opacity_slider.setValue(int(self._opacity * 100))
+        self.opacity_slider.setFixedWidth(80)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
 
-        # 투명도
-        self.opacity_title = tk.Label(right_controls, text="", fg=C["dim3"], bg=C["bg"],
-                                      font=("SF Pro Text", 9))
-        self.opacity_title.pack(side=tk.LEFT, padx=(0, 4))
+        self.opacity_label = QLabel(f"{int(self._opacity * 100)}%")
+        self.opacity_label.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
+        self.opacity_label.setFixedWidth(35)
 
-        self.opacity_var = tk.DoubleVar(value=self._opacity)
-        self.opacity_scale = tk.Scale(
-            right_controls, from_=0.3, to=1.0, resolution=0.01,
-            orient=tk.HORIZONTAL, length=80,
-            variable=self.opacity_var, command=self._on_opacity_change,
-            bg=C["bg"], fg=C["dim2"], troughcolor=C["border"],
-            highlightthickness=0, bd=0, sliderrelief="flat",
-            activebackground=C["blue"], font=("SF Pro Text", 8),
-            showvalue=False,
-        )
-        self.opacity_scale.pack(side=tk.LEFT, padx=(0, 2))
+        self.hist_btn = QPushButton()
+        self.hist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hist_btn.clicked.connect(self.show_history)
 
-        self.opacity_label = tk.Label(right_controls, text=f"{int(self._opacity * 100)}%",
-                                      fg=C["dim2"], bg=C["bg"],
-                                      font=("SF Pro Text", 9), width=4)
-        self.opacity_label.pack(side=tk.LEFT, padx=(0, 16))
+        tb_layout.addWidget(self.lang_label)
+        tb_layout.addWidget(self.lang_btn)
+        tb_layout.addSpacing(12)
+        tb_layout.addWidget(self.opacity_title)
+        tb_layout.addWidget(self.opacity_slider)
+        tb_layout.addWidget(self.opacity_label)
+        tb_layout.addSpacing(12)
+        tb_layout.addWidget(self.hist_btn)
 
-        # 히스토리 버튼
-        self.hist_btn = tk.Label(right_controls, text="", fg=C["dim2"], bg=C["bg"],
-                                 font=("SF Pro Text", 10), cursor="pointinghand",
-                                 padx=10, pady=3)
-        self.hist_btn.pack(side=tk.LEFT)
-        self.hist_btn.bind("<Button-1>", lambda e: self.show_history())
-        self.hist_btn.bind("<Enter>", lambda e: self.hist_btn.config(fg=C["text"]))
-        self.hist_btn.bind("<Leave>", lambda e: self.hist_btn.config(fg=C["dim2"]))
+        main_layout.addWidget(topbar)
 
         # 구분선
-        tk.Frame(self.root, bg=C["divider"], height=1).pack(fill=tk.X, padx=24)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"color: {C['divider']};")
+        divider.setFixedHeight(1)
+        main_layout.addWidget(divider)
 
         # ── 본문 ──
-        body = tk.Frame(self.root, bg=C["bg"], padx=24, pady=12)
-        body.pack(fill=tk.BOTH, expand=True)
-        body.columnconfigure(0, weight=1, uniform="col")
-        body.columnconfigure(1, weight=1, uniform="col")
-        body.rowconfigure(0, weight=1)
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(24, 12, 24, 12)
+        body_layout.setSpacing(12)
 
         # ── 왼쪽: Tasks ──
-        left = self._glass_card(body)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left = QWidget()
+        left.setStyleSheet(f"QWidget#left {{ border: 1px solid {C['border']}; }}")
+        left.setObjectName("left")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
 
-        lh = tk.Frame(left, bg=C["bg"])
-        lh.pack(fill=tk.X, padx=18, pady=(12, 0))
-        self.tasks_title = tk.Label(lh, text="", fg=C["dim2"], bg=C["bg"],
-                                    font=("SF Pro Text", 9), anchor="w")
-        self.tasks_title.pack(side=tk.LEFT)
-        self.task_count_label = tk.Label(lh, text="", fg=C["dim3"], bg=C["bg"],
-                                         font=("SF Pro Text", 9))
-        self.task_count_label.pack(side=tk.RIGHT)
+        # Task 헤더
+        lh = QWidget()
+        lh_layout = QHBoxLayout(lh)
+        lh_layout.setContentsMargins(18, 12, 18, 0)
+        self.tasks_title = QLabel()
+        self.tasks_title.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
+        self.task_count_label = QLabel()
+        self.task_count_label.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
+        lh_layout.addWidget(self.tasks_title)
+        lh_layout.addStretch()
+        lh_layout.addWidget(self.task_count_label)
+        left_layout.addWidget(lh)
 
-        tk.Frame(left, bg=C["divider"], height=1).pack(fill=tk.X, padx=18, pady=(8, 0))
+        div1 = QFrame()
+        div1.setFrameShape(QFrame.Shape.HLine)
+        div1.setStyleSheet(f"color: {C['divider']};")
+        div1.setFixedHeight(1)
+        div1.setContentsMargins(18, 8, 18, 0)
+        left_layout.addWidget(div1)
 
         # 입력
-        input_frame = tk.Frame(left, bg=C["bg"], padx=18, pady=10)
-        input_frame.pack(fill=tk.X)
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(18, 10, 18, 10)
+        self.task_entry = QLineEdit()
+        self.task_entry.returnPressed.connect(self.on_add_task)
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(30, 30)
+        add_btn.setStyleSheet(f"border: none; color: {C['blue']}; font-size: 18px; font-weight: bold;")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(self.on_add_task)
+        input_layout.addWidget(self.task_entry)
+        input_layout.addWidget(add_btn)
+        left_layout.addLayout(input_layout)
 
-        input_inner = tk.Frame(input_frame, bg=C["input_bg"],
-                               highlightbackground=C["border"], highlightthickness=1)
-        input_inner.pack(fill=tk.X)
-
-        self.task_entry = tk.Entry(
-            input_inner, font=("SF Pro Text", 11),
-            bg=C["input_bg"], fg=C["text"], insertbackground=C["blue"],
-            relief="flat", bd=0, highlightthickness=0,
-        )
-        self.task_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=7, padx=12)
-        self.task_entry.config(fg=C["dim3"])
-        self.task_entry.bind("<FocusIn>", self._on_entry_focus_in)
-        self.task_entry.bind("<FocusOut>", self._on_entry_focus_out)
-        self.task_entry.bind("<Return>", lambda e: self.on_add_task())
-
-        add_btn = tk.Label(input_inner, text=" + ", font=("SF Pro Text", 14),
-                           fg=C["blue"], bg=C["input_bg"], cursor="pointinghand")
-        add_btn.pack(side=tk.RIGHT, padx=(0, 6))
-        add_btn.bind("<Button-1>", lambda e: self.on_add_task())
-
-        # 할 일 리스트
-        self.task_canvas = tk.Canvas(left, bg=C["bg"], highlightthickness=0, bd=0)
-        self.task_canvas.pack(fill=tk.BOTH, expand=True)
-
-        self.task_list_frame = tk.Frame(self.task_canvas, bg=C["bg"])
-        self.task_canvas.create_window((0, 0), window=self.task_list_frame,
-                                       anchor="nw", tags="frame")
-        self.task_list_frame.bind(
-            "<Configure>",
-            lambda e: self.task_canvas.configure(scrollregion=self.task_canvas.bbox("all")),
-        )
-        self.task_canvas.bind(
-            "<Configure>",
-            lambda e: self.task_canvas.itemconfig("frame", width=e.width),
-        )
-        self.task_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        # 할 일 리스트 (스크롤)
+        self.task_scroll = QScrollArea()
+        self.task_scroll.setWidgetResizable(True)
+        self.task_list_widget = QWidget()
+        self.task_list_layout = QVBoxLayout(self.task_list_widget)
+        self.task_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.task_list_layout.setSpacing(0)
+        self.task_list_layout.addStretch()
+        self.task_scroll.setWidget(self.task_list_widget)
+        left_layout.addWidget(self.task_scroll)
 
         # ── 오른쪽: Notes ──
-        right = self._glass_card(body)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        right = QWidget()
+        right.setStyleSheet(f"QWidget#right {{ border: 1px solid {C['border']}; }}")
+        right.setObjectName("right")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
 
-        rh = tk.Frame(right, bg=C["bg"])
-        rh.pack(fill=tk.X, padx=18, pady=(12, 0))
-        self.notes_title = tk.Label(rh, text="", fg=C["dim2"], bg=C["bg"],
-                                    font=("SF Pro Text", 9), anchor="w")
-        self.notes_title.pack(side=tk.LEFT)
+        # Note 헤더
+        rh = QWidget()
+        rh_layout = QHBoxLayout(rh)
+        rh_layout.setContentsMargins(18, 12, 18, 0)
+        self.notes_title = QLabel()
+        self.notes_title.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
+        rh_layout.addWidget(self.notes_title)
+        rh_layout.addStretch()
 
-        # Export MD 버튼
-        self.export_btn = tk.Label(rh, text="", fg=C["dim3"], bg=C["bg"],
-                                   font=("SF Pro Text", 9), cursor="pointinghand", padx=6)
-        self.export_btn.pack(side=tk.RIGHT, padx=(8, 0))
-        self.export_btn.bind("<Button-1>", lambda e: self._export_md())
-        self.export_btn.bind("<Enter>", lambda e: self.export_btn.config(fg=C["blue"]))
-        self.export_btn.bind("<Leave>", lambda e: self.export_btn.config(fg=C["dim3"]))
+        self.note_status_label = QLabel()
+        self.note_status_label.setStyleSheet(f"color: {C['dim3']}; font-size: 11px;")
+        rh_layout.addWidget(self.note_status_label)
 
-        self.note_status_label = tk.Label(rh, text="", fg=C["dim3"], bg=C["bg"],
-                                          font=("SF Pro Text", 9))
-        self.note_status_label.pack(side=tk.RIGHT)
+        self.save_btn = QPushButton()
+        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
+        self.save_btn.clicked.connect(self._save_note_now)
+        rh_layout.addWidget(self.save_btn)
 
-        tk.Frame(right, bg=C["divider"], height=1).pack(fill=tk.X, padx=18, pady=(8, 0))
+        self.export_btn = QPushButton()
+        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_btn.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
+        self.export_btn.clicked.connect(self._export_md)
+        rh_layout.addWidget(self.export_btn)
 
-        self.note_text = tk.Text(
-            right, wrap="word", font=("SF Mono", 11), undo=True,
-            bg=C["bg"], fg=C["dim1"], insertbackground=C["blue"],
-            relief="flat", bd=0, padx=18, pady=12,
-            selectbackground="#2a3a5a", selectforeground=C["text"],
-            highlightthickness=0,
-        )
-        self.note_text.pack(fill=tk.BOTH, expand=True)
+        right_layout.addWidget(rh)
 
-        self.note_text.bind("<<Modified>>", self._on_note_modified)
+        div2 = QFrame()
+        div2.setFrameShape(QFrame.Shape.HLine)
+        div2.setStyleSheet(f"color: {C['divider']};")
+        div2.setFixedHeight(1)
+        right_layout.addWidget(div2)
+
+        # 메모 텍스트
+        self.note_text = QTextEdit()
+        self.note_text.setAcceptRichText(False)
+        right_layout.addWidget(self.note_text)
+
+        body_layout.addWidget(left, 1)
+        body_layout.addWidget(right, 1)
+        main_layout.addWidget(body, 1)
 
         # ── 상태바 ──
-        self.status = tk.Label(self.root, text="", font=("SF Pro Text", 9),
-                               fg=C["dim3"], bg=C["bg"], anchor="w", padx=24, pady=4)
-        self.status.pack(fill=tk.X)
+        self.status = QLabel()
+        self.status.setStyleSheet(f"color: {C['dim3']}; font-size: 11px; padding: 4px 24px;")
+        main_layout.addWidget(self.status)
 
-        # 초기 텍스트 세팅
+        # 초기 텍스트
         self._apply_lang_texts()
 
     # ── 다국어 텍스트 적용 ───────────────────────
     def _apply_lang_texts(self):
         self.t = I18N[self.lang]
-        self.tasks_title.config(text=self._tx("tasks"))
-        self.notes_title.config(text=self._tx("notes"))
-        self.hist_btn.config(text=self._tx("history"))
-        self.opacity_title.config(text=self._tx("opacity"))
-        self.export_btn.config(text=self._tx("export_md"))
-        self.lang_label.config(text=self._tx("lang_label"))
-        self.lang_btn.config(text="EN" if self.lang == "ko" else "KO")
-        # placeholder 갱신
-        if self.task_entry.get() in [I18N["ko"]["add_placeholder"],
-                                      I18N["en"]["add_placeholder"], ""]:
-            self.task_entry.delete(0, tk.END)
-            self.task_entry.insert(0, self._tx("add_placeholder"))
-            self.task_entry.config(fg=C["dim3"])
+        self.tasks_title.setText(self._tx("tasks"))
+        self.notes_title.setText(self._tx("notes"))
+        self.hist_btn.setText(self._tx("history"))
+        self.opacity_title.setText(self._tx("opacity"))
+        self.export_btn.setText(self._tx("export_md"))
+        self.save_btn.setText(self._tx("save"))
+        self.lang_label.setText(self._tx("lang_label"))
+        self.lang_btn.setText("EN" if self.lang == "ko" else "KO")
+        self.task_entry.setPlaceholderText(self._tx("add_placeholder"))
 
     def _toggle_lang(self):
         self.lang = "en" if self.lang == "ko" else "ko"
@@ -464,43 +525,6 @@ class SchedulerApp:
         self._apply_lang_texts()
         self._update_date_label()
         self._refresh_tasks()
-
-    # ── 헬퍼 위젯 ────────────────────────────────
-    def _glass_card(self, parent):
-        return tk.Frame(parent, bg=C["bg"], highlightbackground=C["border"],
-                        highlightthickness=1)
-
-    def _make_nav_btn(self, parent, text, command):
-        btn = tk.Label(parent, text=f" {text} ", font=("SF Pro Text", 12, "bold"),
-                       fg=C["dim2"], bg=C["bg"], cursor="pointinghand")
-        btn.bind("<Button-1>", lambda e: command())
-        btn.bind("<Enter>", lambda e: btn.config(fg=C["text"]))
-        btn.bind("<Leave>", lambda e: btn.config(fg=C["dim2"]))
-        return btn
-
-    # ── placeholder ──────────────────────────────
-    def _on_entry_focus_in(self, event):
-        if self.task_entry.get() == self._tx("add_placeholder"):
-            self.task_entry.delete(0, tk.END)
-            self.task_entry.config(fg=C["text"])
-
-    def _on_entry_focus_out(self, event):
-        if not self.task_entry.get().strip():
-            self.task_entry.delete(0, tk.END)
-            self.task_entry.insert(0, self._tx("add_placeholder"))
-            self.task_entry.config(fg=C["dim3"])
-
-    def _on_mousewheel(self, event):
-        x, y = self.root.winfo_pointerxy()
-        widget = self.root.winfo_containing(x, y)
-        if widget is None:
-            return
-        w = widget
-        while w is not None:
-            if w == self.task_canvas:
-                self.task_canvas.yview_scroll(int(-1 * (event.delta)), "units")
-                return
-            w = w.master
 
     # ── 데이터 갱신 ──────────────────────────────
     def refresh_all(self):
@@ -517,215 +541,110 @@ class SchedulerApp:
     def _update_date_label(self):
         d = datetime.strptime(self.current_date, "%Y-%m-%d").date()
         wd = self.t["weekdays"][d.weekday()]
-        self.date_label.config(text=f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})")
+        self.date_label.setText(f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})")
 
         if self.current_date == self.today_str:
-            self.today_badge.config(text=self._tx("today"), fg=C["blue"])
+            self.today_badge.setText(self._tx("today"))
+            self.today_badge.setStyleSheet(f"border: none; color: {C['blue']}; font-size: 11px;")
         elif self.current_date == (date.today() - timedelta(days=1)).isoformat():
-            self.today_badge.config(text=self._tx("yesterday"), fg=C["amber"])
+            self.today_badge.setText(self._tx("yesterday"))
+            self.today_badge.setStyleSheet(f"border: none; color: {C['amber']}; font-size: 11px;")
         else:
-            self.today_badge.config(text=self._tx("go_today"), fg=C["dim3"])
+            self.today_badge.setText(self._tx("go_today"))
+            self.today_badge.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
 
     def _refresh_tasks(self):
-        for w in self.task_list_frame.winfo_children():
-            w.destroy()
+        # 기존 위젯 제거
+        while self.task_list_layout.count():
+            item = self.task_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
         tasks = fetch_tasks(self.current_date)
         done_count = sum(1 for _, _, d in tasks if d)
         total = len(tasks)
         if total > 0:
-            self.task_count_label.config(
-                text=f"{done_count}/{total} {self._tx('done_count')}"
-            )
+            self.task_count_label.setText(f"{done_count}/{total} {self._tx('done_count')}")
         else:
-            self.task_count_label.config(text="")
+            self.task_count_label.setText("")
 
         if not tasks:
-            empty = tk.Frame(self.task_list_frame, bg=C["bg"])
-            empty.pack(fill=tk.BOTH, expand=True, pady=40)
-            tk.Label(empty, text=self._tx("no_tasks"), font=("SF Pro Text", 11),
-                     fg=C["dim3"], bg=C["bg"]).pack()
-            tk.Label(empty, text=self._tx("no_tasks_hint"),
-                     font=("SF Pro Text", 10), fg=C["divider"], bg=C["bg"]).pack(pady=(3, 0))
-            return
+            empty = QLabel(f"{self._tx('no_tasks')}\n{self._tx('no_tasks_hint')}")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setStyleSheet(f"color: {C['dim3']}; font-size: 13px; padding: 40px;")
+            self.task_list_layout.addWidget(empty)
+        else:
+            for tid, title, done in tasks:
+                self._create_task_row(tid, title, bool(done))
 
-        for tid, title, done in tasks:
-            self._create_task_row(tid, title, bool(done))
+        self.task_list_layout.addStretch()
 
     def _create_task_row(self, tid, title, done):
-        row = tk.Frame(self.task_list_frame, bg=C["bg"], padx=18, pady=0)
-        row.pack(fill=tk.X)
-
-        inner = tk.Frame(row, bg=C["bg"], pady=7)
-        inner.pack(fill=tk.X)
+        row = QWidget()
+        row.setStyleSheet(f"QWidget {{ background: transparent; }} QWidget:hover {{ background: {C['hover']}; }}")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(18, 7, 18, 7)
 
         # 상태 도트
-        dot_canvas = tk.Canvas(inner, width=18, height=18, bg=C["bg"], highlightthickness=0)
-        dot_canvas.pack(side=tk.LEFT, padx=(0, 8))
+        dot = QLabel("●" if done else "○")
+        dot.setFixedWidth(18)
+        dot.setStyleSheet(f"color: {C['green'] if done else C['dim3']}; font-size: 10px;")
+        dot.setCursor(Qt.CursorShape.PointingHandCursor)
+        dot.mousePressEvent = lambda e, t=tid, d=done: (toggle_task(t, not d), self._refresh_tasks())
+
+        # 텍스트
+        lbl = QLabel(title)
         if done:
-            dot_canvas.create_oval(5, 5, 13, 13, fill=C["green"], outline="")
+            lbl.setStyleSheet(f"color: {C['dim3']}; font-size: 13px; text-decoration: line-through;")
         else:
-            dot_canvas.create_oval(5, 5, 13, 13, fill="", outline=C["dim3"], width=1.5)
+            lbl.setStyleSheet(f"color: {C['dim1']}; font-size: 13px;")
+        lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        lbl.mousePressEvent = lambda e, t=tid, d=done: (toggle_task(t, not d), self._refresh_tasks())
 
-        def on_toggle(e=None):
-            toggle_task(tid, not done)
-            self._refresh_tasks()
+        # 삭제 버튼
+        del_btn = QPushButton("\u00d7")
+        del_btn.setFixedSize(20, 20)
+        del_btn.setStyleSheet(f"border: none; color: transparent; font-size: 14px;")
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.clicked.connect(lambda checked=False, t=tid: (delete_task(t), self._refresh_tasks()))
 
-        dot_canvas.bind("<Button-1>", on_toggle)
-        dot_canvas.config(cursor="pointinghand")
+        # 호버 시 삭제 버튼 표시
+        row.enterEvent = lambda e, b=del_btn: b.setStyleSheet(f"border: none; color: {C['red']}; font-size: 14px;")
+        row.leaveEvent = lambda e, b=del_btn: b.setStyleSheet(f"border: none; color: transparent; font-size: 14px;")
 
-        fg = C["dim3"] if done else C["dim1"]
-        fnt = ("SF Pro Text", 11, "overstrike") if done else ("SF Pro Text", 11)
-        lbl = tk.Label(inner, text=title, font=fnt, fg=fg, bg=C["bg"], anchor="w")
-        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        lbl.bind("<Button-1>", on_toggle)
-        lbl.config(cursor="pointinghand")
+        row_layout.addWidget(dot)
+        row_layout.addWidget(lbl, 1)
+        row_layout.addWidget(del_btn)
 
-        del_btn = tk.Label(inner, text="\u00d7", font=("SF Pro Text", 12),
-                           fg=C["bg"], bg=C["bg"], cursor="pointinghand")
-        del_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self.task_list_layout.addWidget(row)
 
-        all_widgets = [row, inner, lbl, dot_canvas, del_btn]
-
-        def show_hover(e):
-            del_btn.config(fg=C["red"])
-            for w in all_widgets:
-                try:
-                    w.config(bg=C["hover"])
-                except tk.TclError:
-                    pass
-
-        def hide_hover(e):
-            del_btn.config(fg=C["bg"])
-            for w in all_widgets:
-                try:
-                    w.config(bg=C["bg"])
-                except tk.TclError:
-                    pass
-
-        for w in all_widgets:
-            w.bind("<Enter>", show_hover)
-            w.bind("<Leave>", hide_hover)
-
-        del_btn.bind("<Button-1>", lambda e, _tid=tid: self._on_delete_task(_tid))
-        tk.Frame(self.task_list_frame, bg=C["divider"], height=1).pack(fill=tk.X, padx=18)
-
-    def _on_delete_task(self, tid):
-        delete_task(tid)
-        self._refresh_tasks()
+        # 구분선
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet(f"color: {C['divider']};")
+        div.setFixedHeight(1)
+        div.setContentsMargins(18, 0, 18, 0)
+        self.task_list_layout.addWidget(div)
 
     def on_add_task(self):
-        title = self.task_entry.get().strip()
-        if not title or title == self._tx("add_placeholder"):
+        title = self.task_entry.text().strip()
+        if not title:
             return
         add_task(self.current_date, title)
-        self.task_entry.delete(0, tk.END)
+        self.task_entry.clear()
         self._refresh_tasks()
-        self.task_entry.focus_set()
+        self.task_entry.setFocus()
 
     # ── 메모 ─────────────────────────────────────
     def _refresh_note(self):
-        self.note_text.unbind("<<Modified>>")
-        self.note_text.delete("1.0", tk.END)
-        self.note_text.insert("1.0", fetch_note(self.current_date))
-        self.note_text.edit_modified(False)
-        self.note_text.bind("<<Modified>>", self._on_note_modified)
-        self.note_status_label.config(text="")
-
-    def _on_note_modified(self, event=None):
-        if not self.note_text.edit_modified():
-            return
-        if self._note_save_after_id:
-            self.root.after_cancel(self._note_save_after_id)
-        self._note_save_after_id = self.root.after(1000, self._save_note_now)
-        self.note_text.edit_modified(False)
-
-    # ── Command 키 우회 (Tk 9.0 + macOS 26 버그) ──
-    def _handle_command_keys(self, event):
-        """keysym이 깨지는 버그 우회: state와 char로 Command 조합 판별"""
-        if not (event.state & 0x8):  # Command/Meta 키가 눌려있지 않으면 무시
-            return
-        widget = self.root.focus_get()
-        if widget is None:
-            return
-
-        char = event.char.lower()
-
-        if char == 'c':
-            # Copy
-            try:
-                if isinstance(widget, tk.Text):
-                    text = widget.get("sel.first", "sel.last")
-                elif isinstance(widget, tk.Entry) and widget.selection_present():
-                    text = widget.selection_get()
-                else:
-                    return "break"
-                widget.clipboard_clear()
-                widget.clipboard_append(text)
-            except tk.TclError:
-                pass
-            return "break"
-
-        elif char == 'v':
-            # Paste
-            try:
-                text = widget.clipboard_get()
-                if isinstance(widget, tk.Text):
-                    try:
-                        widget.delete("sel.first", "sel.last")
-                    except tk.TclError:
-                        pass
-                    widget.insert("insert", text)
-                elif isinstance(widget, tk.Entry):
-                    if widget.selection_present():
-                        widget.delete("sel.first", "sel.last")
-                    widget.insert("insert", text)
-            except tk.TclError:
-                pass
-            return "break"
-
-        elif char == 'x':
-            # Cut
-            try:
-                if isinstance(widget, tk.Text):
-                    text = widget.get("sel.first", "sel.last")
-                    widget.clipboard_clear()
-                    widget.clipboard_append(text)
-                    widget.delete("sel.first", "sel.last")
-                elif isinstance(widget, tk.Entry) and widget.selection_present():
-                    text = widget.selection_get()
-                    widget.clipboard_clear()
-                    widget.clipboard_append(text)
-                    widget.delete("sel.first", "sel.last")
-            except tk.TclError:
-                pass
-            return "break"
-
-        elif char == 'a':
-            # Select All
-            if isinstance(widget, tk.Text):
-                widget.tag_add("sel", "1.0", "end")
-            elif isinstance(widget, tk.Entry):
-                widget.select_range(0, tk.END)
-                widget.icursor(tk.END)
-            return "break"
-
-        elif char == 'z':
-            # Undo (Cmd+Z) / Redo (Cmd+Shift+Z)
-            try:
-                if event.state & 0x1:  # Shift
-                    widget.edit_redo()
-                else:
-                    widget.edit_undo()
-            except (tk.TclError, AttributeError):
-                pass
-            return "break"
+        self.note_text.setPlainText(fetch_note(self.current_date))
+        self.note_status_label.setText("")
 
     def _save_note_now(self):
-        content = self.note_text.get("1.0", "end-1c")
+        content = self.note_text.toPlainText()
         save_note(self.current_date, content)
         now = datetime.now().strftime("%H:%M:%S")
-        self.note_status_label.config(text=f"{self._tx('saved')} {now}")
+        self.note_status_label.setText(f"{self._tx('saved')} {now}")
 
     # ── .md 내보내기 ─────────────────────────────
     def _export_md(self):
@@ -756,11 +675,9 @@ class SchedulerApp:
         md_text = "\n".join(lines)
         default_name = f"daily_{d}.md"
 
-        filepath = filedialog.asksaveasfilename(
-            parent=self.root,
-            defaultextension=".md",
-            filetypes=[("Markdown", "*.md"), ("All Files", "*.*")],
-            initialfile=default_name,
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, self._tx("export_md"), default_name,
+            "Markdown (*.md);;All Files (*.*)"
         )
         if not filepath:
             return
@@ -790,92 +707,84 @@ class SchedulerApp:
     def show_history(self):
         dates = fetch_history_dates()
         if not dates:
-            messagebox.showinfo(self._tx("history"), self._tx("no_records"))
+            QMessageBox.information(self, self._tx("history"), self._tx("no_records"))
             return
 
-        win = tk.Toplevel(self.root)
-        win.title(self._tx("history"))
-        win.geometry("340x480")
-        win.configure(bg=C["bg"])
-        try:
-            win.attributes("-alpha", self._opacity)
-        except tk.TclError:
-            pass
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self._tx("history"))
+        dlg.resize(340, 480)
+        dlg.setStyleSheet(STYLESHEET)
+        dlg.setWindowOpacity(self._opacity)
 
-        tk.Label(win, text=self._tx("history"), fg=C["dim2"], bg=C["bg"],
-                 font=("SF Pro Text", 9), padx=18, pady=12, anchor="w").pack(fill=tk.X)
-        tk.Frame(win, bg=C["divider"], height=1).pack(fill=tk.X, padx=18)
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        canvas = tk.Canvas(win, bg=C["bg"], highlightthickness=0)
-        canvas.pack(fill=tk.BOTH, expand=True)
-        inner = tk.Frame(canvas, bg=C["bg"])
-        canvas.create_window((0, 0), window=inner, anchor="nw", tags="frame")
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig("frame", width=e.width))
+        header = QLabel(self._tx("history"))
+        header.setStyleSheet(f"color: {C['dim2']}; font-size: 11px; padding: 12px 18px;")
+        layout.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(0)
 
         for i, d_str in enumerate(dates):
             d = datetime.strptime(d_str, "%Y-%m-%d").date()
             wd = self.t["weekdays"][d.weekday()]
             label_text = f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})"
 
-            row = tk.Frame(inner, bg=C["bg"], padx=18, pady=7)
-            row.pack(fill=tk.X)
-
-            lbl = tk.Label(row, text=label_text, font=("SF Pro Text", 11),
-                           fg=C["dim1"], bg=C["bg"], anchor="w", cursor="pointinghand")
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-            if d_str == self.today_str:
-                tk.Label(row, text=self._tx("today"), font=("SF Pro Text", 9),
-                         fg=C["blue"], bg=C["bg"], padx=4).pack(side=tk.RIGHT)
+            row = QPushButton(label_text)
+            row.setStyleSheet(f"""
+                QPushButton {{
+                    text-align: left; border: none; padding: 10px 18px;
+                    color: {C['dim1']}; font-size: 13px;
+                }}
+                QPushButton:hover {{ background: {C['hover']}; }}
+            """)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
 
             def make_jump(idx):
-                def jump(e=None):
+                def jump():
                     self._save_note_now()
                     self.current_date = dates[idx]
                     self.refresh_all()
-                    win.destroy()
+                    dlg.close()
                 return jump
 
-            row.bind("<Button-1>", make_jump(i))
-            lbl.bind("<Button-1>", make_jump(i))
-
-            def make_hover(r, l):
-                def enter(e):
-                    r.config(bg=C["hover"])
-                    l.config(bg=C["hover"])
-                def leave(e):
-                    r.config(bg=C["bg"])
-                    l.config(bg=C["bg"])
-                return enter, leave
-
-            enter_fn, leave_fn = make_hover(row, lbl)
-            for w in (row, lbl):
-                w.bind("<Enter>", enter_fn)
-                w.bind("<Leave>", leave_fn)
+            row.clicked.connect(make_jump(i))
+            inner_layout.addWidget(row)
 
             if i < len(dates) - 1:
-                tk.Frame(inner, bg=C["divider"], height=1).pack(fill=tk.X, padx=18)
+                div = QFrame()
+                div.setFrameShape(QFrame.Shape.HLine)
+                div.setStyleSheet(f"color: {C['divider']};")
+                div.setFixedHeight(1)
+                inner_layout.addWidget(div)
+
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
+        dlg.exec()
 
     # ── 투명도 ───────────────────────────────────
     def _on_opacity_change(self, value):
-        alpha = float(value)
+        alpha = value / 100.0
         self._opacity = alpha
-        try:
-            self.root.attributes("-alpha", alpha)
-        except tk.TclError:
-            pass
-        self.opacity_label.config(text=f"{int(alpha * 100)}%")
+        self.setWindowOpacity(alpha)
+        self.opacity_label.setText(f"{value}%")
 
     # ── 기타 ────────────────────────────────────
     def _set_status(self, text):
-        self.status.config(text=text)
+        self.status.setText(text)
 
-    def _on_close(self):
+    def closeEvent(self, event):
         self._save_note_now()
         set_meta("opacity", f"{self._opacity:.2f}")
         set_meta("lang", self.lang)
-        self.root.destroy()
+        event.accept()
 
 
 # ────────────────────────────────────────────────
@@ -883,9 +792,10 @@ class SchedulerApp:
 # ────────────────────────────────────────────────
 def main():
     init_db()
-    root = tk.Tk()
-    SchedulerApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = SchedulerApp()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
