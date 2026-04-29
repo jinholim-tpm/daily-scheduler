@@ -1,0 +1,80 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: DailyScheduler-macOS
+            ext: app
+          - os: windows-latest
+            artifact: DailyScheduler-Windows
+            ext: exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      # macOS build
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --windowed --onefile --name DailyScheduler --icon AppIcon.icns daily_scheduler.py
+          cd dist
+          zip -r DailyScheduler-macOS.zip DailyScheduler.app
+
+      # Windows build
+      - name: Build Windows exe
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --windowed --onefile --name DailyScheduler daily_scheduler.py
+
+      # Upload artifacts
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DailyScheduler-macOS
+          path: dist/DailyScheduler-macOS.zip
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DailyScheduler-Windows
+          path: dist/DailyScheduler.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/DailyScheduler-macOS/DailyScheduler-macOS.zip
+            artifacts/DailyScheduler-Windows/DailyScheduler.exe
+          generate_release_notes: true
