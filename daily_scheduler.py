@@ -16,10 +16,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit, QSlider, QScrollArea,
-    QFrame, QFileDialog, QMessageBox, QDialog, QSizePolicy, QSpacerItem,
+    QFrame, QFileDialog, QMessageBox, QDialog,
 )
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QColor, QShortcut, QKeySequence, QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QShortcut, QKeySequence
 
 # ────────────────────────────────────────────────
 # 다국어
@@ -41,6 +41,8 @@ I18N = {
         "saved": "저장됨",
         "export_md": "MD",
         "save": "저장",
+        "add_child": "+ 하위 항목",
+        "new_child": "새 하위 항목",
         "export_success": "내보내기 완료: {path}",
         "no_records": "기록된 날짜가 없습니다.",
         "done_count": "완료",
@@ -63,6 +65,8 @@ I18N = {
         "saved": "Saved",
         "export_md": "MD",
         "save": "Save",
+        "add_child": "+ Sub-item",
+        "new_child": "New sub-item",
         "export_success": "Exported: {path}",
         "no_records": "No records found.",
         "done_count": "done",
@@ -118,7 +122,10 @@ def init_db():
                 title       TEXT NOT NULL,
                 done        INTEGER NOT NULL DEFAULT 0,
                 carried     INTEGER NOT NULL DEFAULT 0,
-                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                parent_id   INTEGER DEFAULT NULL,
+                sort_order  INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY (parent_id) REFERENCES tasks(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date);
             CREATE TABLE IF NOT EXISTS notes (
@@ -131,6 +138,12 @@ def init_db():
                 value TEXT NOT NULL
             );
         """)
+        # 기존 DB 마이그레이션: parent_id, sort_order 컬럼 추가
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "parent_id" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER DEFAULT NULL")
+        if "sort_order" not in cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 
 
 def get_meta(key, default=None):
@@ -153,16 +166,30 @@ def carry_over_tasks(today_str):
         ).fetchone()
         if row and row[0] == today_str:
             return 0
+        # 부모 태스크만 이월 (자식은 부모와 함께 이월)
         rows = conn.execute(
-            "SELECT id, title FROM tasks WHERE date < ? AND done = 0 AND carried = 0",
+            "SELECT id, title FROM tasks WHERE date < ? AND done = 0 AND carried = 0 AND parent_id IS NULL",
             (today_str,),
         ).fetchall()
         for tid, title in rows:
+            # 부모 이월
             conn.execute(
-                "INSERT INTO tasks (date, title, done, carried) VALUES (?, ?, 0, 0)",
+                "INSERT INTO tasks (date, title, done, carried, parent_id, sort_order) VALUES (?, ?, 0, 0, NULL, 0)",
                 (today_str, title),
             )
+            new_parent_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             conn.execute("UPDATE tasks SET carried = 1 WHERE id = ?", (tid,))
+            # 자식 이월
+            children = conn.execute(
+                "SELECT id, title FROM tasks WHERE parent_id = ? AND done = 0 AND carried = 0",
+                (tid,),
+            ).fetchall()
+            for cid, ctitle in children:
+                conn.execute(
+                    "INSERT INTO tasks (date, title, done, carried, parent_id, sort_order) VALUES (?, ?, 0, 0, ?, 0)",
+                    (today_str, ctitle, new_parent_id),
+                )
+                conn.execute("UPDATE tasks SET carried = 1 WHERE id = ?", (cid,))
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_carry_over', ?)",
             (today_str,),
@@ -171,26 +198,103 @@ def carry_over_tasks(today_str):
 
 
 def fetch_tasks(d):
+    """부모-자식 트리 구조로 반환: [(id, title, done, parent_id, sort_order, children), ...]"""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, title, done, parent_id, sort_order FROM tasks WHERE date = ? ORDER BY sort_order, id",
+            (d,),
+        ).fetchall()
+    # 트리 구성
+    parents = []
+    children_map = {}
+    for row in rows:
+        tid, title, done, parent_id, sort_order = row
+        if parent_id is None:
+            parents.append({"id": tid, "title": title, "done": done,
+                            "sort_order": sort_order, "children": []})
+        else:
+            children_map.setdefault(parent_id, []).append(
+                {"id": tid, "title": title, "done": done, "sort_order": sort_order}
+            )
+    for p in parents:
+        p["children"] = sorted(children_map.get(p["id"], []), key=lambda c: (c["sort_order"], c["id"]))
+    return parents
+
+
+def fetch_tasks_flat(d):
+    """하위 호환: (id, title, done) 튜플 리스트 반환"""
     with get_conn() as conn:
         return conn.execute(
-            "SELECT id, title, done FROM tasks WHERE date = ? ORDER BY done, id",
+            "SELECT id, title, done FROM tasks WHERE date = ? ORDER BY sort_order, id",
             (d,),
         ).fetchall()
 
 
-def add_task(d, title):
+def add_task(d, title, parent_id=None):
     with get_conn() as conn:
-        conn.execute("INSERT INTO tasks (date, title) VALUES (?, ?)", (d, title.strip()))
+        # 다음 sort_order 계산
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tasks WHERE date = ? AND parent_id IS ?",
+            (d, parent_id),
+        ).fetchone()
+        sort_order = row[0]
+        conn.execute(
+            "INSERT INTO tasks (date, title, parent_id, sort_order) VALUES (?, ?, ?, ?)",
+            (d, title.strip(), parent_id, sort_order),
+        )
+
+
+def update_task_title(tid, title):
+    with get_conn() as conn:
+        conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (title.strip(), tid))
 
 
 def toggle_task(tid, done):
     with get_conn() as conn:
         conn.execute("UPDATE tasks SET done = ? WHERE id = ?", (1 if done else 0, tid))
+        # 부모를 완료하면 자식도 모두 완료
+        if done:
+            conn.execute("UPDATE tasks SET done = 1 WHERE parent_id = ?", (tid,))
 
 
 def delete_task(tid):
     with get_conn() as conn:
+        # 자식도 함께 삭제 (CASCADE 또는 수동)
+        conn.execute("DELETE FROM tasks WHERE parent_id = ?", (tid,))
         conn.execute("DELETE FROM tasks WHERE id = ?", (tid,))
+
+
+def reorder_task(tid, new_sort_order):
+    with get_conn() as conn:
+        conn.execute("UPDATE tasks SET sort_order = ? WHERE id = ?", (new_sort_order, tid))
+
+
+def reparent_task(tid, new_parent_id):
+    """태스크의 부모를 변경. new_parent_id=None이면 최상위로 승격."""
+    with get_conn() as conn:
+        # 자식을 가진 태스크를 다른 태스크의 자식으로 넣으면 안 됨 (1뎁스 제한)
+        if new_parent_id is not None:
+            has_children = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE parent_id = ?", (tid,)
+            ).fetchone()[0]
+            if has_children:
+                return False
+            # 대상 부모가 이미 자식이면 안 됨
+            parent_row = conn.execute(
+                "SELECT parent_id FROM tasks WHERE id = ?", (new_parent_id,)
+            ).fetchone()
+            if parent_row and parent_row[0] is not None:
+                return False
+        # 새 부모 아래의 다음 sort_order
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tasks WHERE parent_id IS ?",
+            (new_parent_id,),
+        ).fetchone()
+        conn.execute(
+            "UPDATE tasks SET parent_id = ?, sort_order = ? WHERE id = ?",
+            (new_parent_id, row[0], tid),
+        )
+        return True
 
 
 def fetch_note(d):
@@ -561,8 +665,18 @@ class SchedulerApp(QMainWindow):
                 item.widget().deleteLater()
 
         tasks = fetch_tasks(self.current_date)
-        done_count = sum(1 for _, _, d in tasks if d)
-        total = len(tasks)
+        # 전체 카운트 (부모 + 자식)
+        total = 0
+        done_count = 0
+        for p in tasks:
+            total += 1
+            if p["done"]:
+                done_count += 1
+            for ch in p["children"]:
+                total += 1
+                if ch["done"]:
+                    done_count += 1
+
         if total > 0:
             self.task_count_label.setText(f"{done_count}/{total} {self._tx('done_count')}")
         else:
@@ -574,57 +688,256 @@ class SchedulerApp(QMainWindow):
             empty.setStyleSheet(f"color: {C['dim3']}; font-size: 13px; padding: 40px;")
             self.task_list_layout.addWidget(empty)
         else:
-            for tid, title, done in tasks:
-                self._create_task_row(tid, title, bool(done))
+            self._drag_source = None
+            for i, task in enumerate(tasks):
+                self._create_task_row(task, indent=0, index=i, total=len(tasks))
+                for j, child in enumerate(task["children"]):
+                    self._create_task_row(child, indent=1, parent_id=task["id"],
+                                          index=j, total=len(task["children"]))
+                # 하위 태스크 추가 버튼
+                add_child_row = QWidget()
+                acr_layout = QHBoxLayout(add_child_row)
+                acr_layout.setContentsMargins(48, 2, 18, 2)
+                add_child_btn = QPushButton(self._tx("add_child"))
+                add_child_btn.setStyleSheet(
+                    f"border: none; color: {C['dim3']}; font-size: 11px; text-align: left; padding: 2px 0;"
+                )
+                add_child_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                add_child_btn.clicked.connect(
+                    lambda checked=False, pid=task["id"]: self._add_child_inline(pid)
+                )
+                acr_layout.addWidget(add_child_btn)
+                acr_layout.addStretch()
+                self.task_list_layout.addWidget(add_child_row)
+
+                # 구분선 (부모 그룹 간)
+                div = QFrame()
+                div.setFrameShape(QFrame.Shape.HLine)
+                div.setStyleSheet(f"color: {C['divider']};")
+                div.setFixedHeight(1)
+                self.task_list_layout.addWidget(div)
 
         self.task_list_layout.addStretch()
 
-    def _create_task_row(self, tid, title, done):
+    def _create_task_row(self, task, indent=0, parent_id=None, index=0, total=1):
+        tid = task["id"]
+        title = task["title"]
+        done = bool(task["done"])
+
         row = QWidget()
+        row.setProperty("task_id", tid)
         row.setStyleSheet(f"QWidget {{ background: transparent; }} QWidget:hover {{ background: {C['hover']}; }}")
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(18, 7, 18, 7)
+        left_margin = 18 + (30 * indent)
+        row_layout.setContentsMargins(left_margin, 5, 18, 5)
 
-        # 상태 도트
-        dot = QLabel("●" if done else "○")
-        dot.setFixedWidth(18)
-        dot.setStyleSheet(f"color: {C['green'] if done else C['dim3']}; font-size: 10px;")
-        dot.setCursor(Qt.CursorShape.PointingHandCursor)
-        dot.mousePressEvent = lambda e, t=tid, d=done: (toggle_task(t, not d), self._refresh_tasks())
+        # 드래그 핸들
+        drag_handle = QPushButton("≡")
+        drag_handle.setFixedSize(24, 28)
+        drag_handle.setStyleSheet(
+            f"border: none; color: {C['dim3']}; font-size: 16px; font-weight: bold; padding: 0;"
+        )
+        drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
+        drag_handle.mousePressEvent = lambda e, t=tid, idx=index: self._drag_start(t, idx, e)
+        drag_handle.mouseMoveEvent = lambda e, t=tid, idx=index, tot=total, pid=parent_id: \
+            self._drag_move(t, idx, tot, pid, e)
+        drag_handle.mouseReleaseEvent = lambda e: self._drag_end(e)
 
-        # 텍스트
-        lbl = QLabel(title)
+        # 체크박스
+        cb = QPushButton()
+        cb.setFixedSize(24, 24)
         if done:
-            lbl.setStyleSheet(f"color: {C['dim3']}; font-size: 13px; text-decoration: line-through;")
+            cb.setText("✓")
+            cb.setStyleSheet(
+                f"QPushButton {{ background: {C['green']}; color: {C['bg']}; border: none; "
+                f"border-radius: 5px; font-size: 15px; font-weight: bold; padding: 0; }}"
+            )
         else:
-            lbl.setStyleSheet(f"color: {C['dim1']}; font-size: 13px;")
-        lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-        lbl.mousePressEvent = lambda e, t=tid, d=done: (toggle_task(t, not d), self._refresh_tasks())
+            cb.setText("")
+            cb.setStyleSheet(
+                f"QPushButton {{ background: transparent; border: 2px solid {C['dim3']}; "
+                f"border-radius: 5px; padding: 0; }}"
+                f"QPushButton:hover {{ border-color: {C['blue']}; }}"
+            )
+        cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        cb.clicked.connect(lambda checked=False, t=tid, d=done: (toggle_task(t, not d), self._refresh_tasks()))
 
-        # 삭제 버튼
+        # 텍스트 (클릭으로 인라인 편집)
+        lbl = QLabel(title)
+        lbl.setMinimumHeight(28)
+        if done:
+            lbl.setStyleSheet(f"color: {C['dim3']}; font-size: 13px; text-decoration: line-through; padding: 0 4px;")
+        else:
+            lbl.setStyleSheet(f"color: {C['dim1']}; font-size: 13px; padding: 0 4px;")
+        lbl.setCursor(Qt.CursorShape.IBeamCursor)
+        lbl.mousePressEvent = lambda e, t=tid, tit=title, l=lbl, rl=row_layout: \
+            self._start_inline_edit(t, tit, l, rl)
+
+        # 삭제 버튼 (항상 보이지만 평소엔 희미하게)
         del_btn = QPushButton("\u00d7")
-        del_btn.setFixedSize(20, 20)
-        del_btn.setStyleSheet(f"border: none; color: transparent; font-size: 14px;")
+        del_btn.setFixedSize(24, 24)
+        del_btn.setStyleSheet(
+            f"QPushButton {{ border: none; color: {C['dim3']}; font-size: 16px; padding: 0; }}"
+            f"QPushButton:hover {{ color: {C['red']}; }}"
+        )
         del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         del_btn.clicked.connect(lambda checked=False, t=tid: (delete_task(t), self._refresh_tasks()))
 
-        # 호버 시 삭제 버튼 표시
-        row.enterEvent = lambda e, b=del_btn: b.setStyleSheet(f"border: none; color: {C['red']}; font-size: 14px;")
-        row.leaveEvent = lambda e, b=del_btn: b.setStyleSheet(f"border: none; color: transparent; font-size: 14px;")
-
-        row_layout.addWidget(dot)
+        row_layout.addWidget(drag_handle)
+        row_layout.addSpacing(4)
+        row_layout.addWidget(cb)
+        row_layout.addSpacing(8)
         row_layout.addWidget(lbl, 1)
         row_layout.addWidget(del_btn)
 
         self.task_list_layout.addWidget(row)
 
-        # 구분선
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet(f"color: {C['divider']};")
-        div.setFixedHeight(1)
-        div.setContentsMargins(18, 0, 18, 0)
-        self.task_list_layout.addWidget(div)
+    def _start_inline_edit(self, tid, title, label, row_layout):
+        """라벨을 QLineEdit으로 교체해서 인라인 편집"""
+        edit = QLineEdit(title)
+        edit.setStyleSheet(
+            f"background: {C['input_bg']}; color: {C['text']}; border: 1px solid {C['blue']}; "
+            f"border-radius: 3px; padding: 3px 6px; font-size: 13px;"
+        )
+        edit.selectAll()
+
+        # 라벨 자리에 에디트 삽입
+        idx = row_layout.indexOf(label)
+        row_layout.removeWidget(label)
+        label.hide()
+        row_layout.insertWidget(idx, edit, 1)
+        edit.setFocus()
+
+        def finish_edit():
+            new_title = edit.text().strip()
+            if new_title and new_title != title:
+                update_task_title(tid, new_title)
+            self._refresh_tasks()
+
+        edit.returnPressed.connect(finish_edit)
+        edit.editingFinished.connect(finish_edit)
+
+    def _add_child_inline(self, parent_id):
+        """하위 태스크 인라인 추가"""
+        add_task(self.current_date, self._tx("new_child"), parent_id=parent_id)
+        self._refresh_tasks()
+        # TODO: 바로 편집 모드 진입 가능
+
+    # ── 드래그 앤 드롭 (순서 변경 + 부모 변경) ──────
+    def _drag_start(self, tid, index, event):
+        # 원본 행 찾기
+        source_row = None
+        for i in range(self.task_list_layout.count()):
+            w = self.task_list_layout.itemAt(i).widget()
+            if w and w.property("task_id") == tid:
+                source_row = w
+                break
+
+        # parent_id + title 조회
+        cur_parent_id = None
+        title = ""
+        with get_conn() as conn:
+            row = conn.execute("SELECT parent_id, title FROM tasks WHERE id = ?", (tid,)).fetchone()
+            if row:
+                cur_parent_id, title = row[0], row[1]
+
+        self._drag_source = {
+            "tid": tid, "index": index,
+            "start_x": event.globalPosition().x(),
+            "start_y": event.globalPosition().y(),
+            "parent_id": cur_parent_id,
+        }
+
+        # 원본 행 흐리게
+        if source_row:
+            source_row.setStyleSheet(f"background: {C['surface']}; opacity: 0.3;")
+
+        # 플로팅 드래그 위젯 생성
+        self._drag_widget = QLabel(f"  ≡  {title}")
+        self._drag_widget.setParent(self)
+        self._drag_widget.setStyleSheet(
+            f"background: {C['surface_strong']}; color: {C['text']}; "
+            f"border: 1px solid {C['blue']}; border-radius: 6px; "
+            f"padding: 8px 14px; font-size: 13px;"
+        )
+        self._drag_widget.setFixedHeight(38)
+        self._drag_widget.adjustSize()
+        # 마우스 위치에 표시
+        local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+        self._drag_widget.move(local_pos.x() - 20, local_pos.y() - 19)
+        self._drag_widget.show()
+        self._drag_widget.raise_()
+
+    def _drag_move(self, tid, index, total, parent_id, event):
+        if not self._drag_source or self._drag_source["tid"] != tid:
+            return
+        # 플로팅 위젯을 마우스 따라 이동
+        if hasattr(self, '_drag_widget') and self._drag_widget:
+            local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+            self._drag_widget.move(local_pos.x() - 20, local_pos.y() - 19)
+
+    def _drag_end(self, event):
+        if not self._drag_source:
+            return
+        source = self._drag_source
+        self._drag_source = None
+
+        # 플로팅 위젯 제거
+        if hasattr(self, '_drag_widget') and self._drag_widget:
+            self._drag_widget.deleteLater()
+            self._drag_widget = None
+
+        tid = source["tid"]
+        parent_id = source.get("parent_id")
+        dx = event.globalPosition().x() - source["start_x"]
+        dy = event.globalPosition().y() - source["start_y"]
+
+        indent_threshold = 50
+        row_height = 40
+        action = None
+
+        if abs(dx) > indent_threshold and abs(dx) > abs(dy):
+            if dx > 0:
+                action = "indent"
+            else:
+                action = "outdent"
+        elif abs(dy) > row_height / 2:
+            action = "reorder"
+
+        if action == "indent":
+            tasks = fetch_tasks(self.current_date)
+            prev_parent = None
+            for p in tasks:
+                if p["id"] == tid:
+                    break
+                prev_parent = p
+            if prev_parent and parent_id is None:
+                reparent_task(tid, prev_parent["id"])
+
+        elif action == "outdent":
+            if parent_id is not None:
+                reparent_task(tid, None)
+
+        elif action == "reorder":
+            steps = int(dy / row_height)
+            with get_conn() as conn:
+                siblings = conn.execute(
+                    "SELECT id FROM tasks WHERE date = ? AND parent_id IS ? ORDER BY sort_order, id",
+                    (self.current_date, parent_id),
+                ).fetchall()
+            ids = [r[0] for r in siblings]
+            if tid in ids:
+                old_pos = ids.index(tid)
+                new_index = max(0, min(len(ids) - 1, old_pos + steps))
+                if new_index != old_pos:
+                    ids.pop(old_pos)
+                    ids.insert(new_index, tid)
+                    for order, task_id in enumerate(ids):
+                        reorder_task(task_id, order)
+                    action = "done"
+
+        if action:
+            self._refresh_tasks()
 
     def on_add_task(self):
         title = self.task_entry.text().strip()
@@ -661,9 +974,12 @@ class SchedulerApp(QMainWindow):
         if tasks:
             lines.append(f"## {self._tx('tasks')}")
             lines.append("")
-            for _, title, done in tasks:
-                check = "x" if done else " "
-                lines.append(f"- [{check}] {title}")
+            for p in tasks:
+                check = "x" if p["done"] else " "
+                lines.append(f"- [{check}] {p['title']}")
+                for ch in p["children"]:
+                    check = "x" if ch["done"] else " "
+                    lines.append(f"  - [{check}] {ch['title']}")
             lines.append("")
 
         if note_content.strip():

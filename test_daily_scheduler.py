@@ -76,31 +76,31 @@ class TestTaskCRUD(BaseDBTestCase):
         ds.add_task("2026-04-29", "테스트 할 일")
         tasks = ds.fetch_tasks("2026-04-29")
         self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0][1], "테스트 할 일")
-        self.assertEqual(tasks[0][2], 0)  # done=False
+        self.assertEqual(tasks[0]["title"], "테스트 할 일")
+        self.assertEqual(tasks[0]["done"], 0)
 
     def test_add_task_strips_whitespace(self):
         ds.add_task("2026-04-29", "  공백 테스트  ")
         tasks = ds.fetch_tasks("2026-04-29")
-        self.assertEqual(tasks[0][1], "공백 테스트")
+        self.assertEqual(tasks[0]["title"], "공백 테스트")
 
     def test_toggle_task(self):
         ds.add_task("2026-04-29", "완료 테스트")
         tasks = ds.fetch_tasks("2026-04-29")
-        tid = tasks[0][0]
+        tid = tasks[0]["id"]
 
         ds.toggle_task(tid, True)
         tasks = ds.fetch_tasks("2026-04-29")
-        self.assertEqual(tasks[0][2], 1)
+        self.assertEqual(tasks[0]["done"], 1)
 
         ds.toggle_task(tid, False)
         tasks = ds.fetch_tasks("2026-04-29")
-        self.assertEqual(tasks[0][2], 0)
+        self.assertEqual(tasks[0]["done"], 0)
 
     def test_delete_task(self):
         ds.add_task("2026-04-29", "삭제 테스트")
         tasks = ds.fetch_tasks("2026-04-29")
-        tid = tasks[0][0]
+        tid = tasks[0]["id"]
 
         ds.delete_task(tid)
         tasks = ds.fetch_tasks("2026-04-29")
@@ -110,25 +110,132 @@ class TestTaskCRUD(BaseDBTestCase):
         tasks = ds.fetch_tasks("2026-04-29")
         self.assertEqual(tasks, [])
 
-    def test_fetch_tasks_ordered_by_done_then_id(self):
+    def test_fetch_tasks_ordered_by_sort_order(self):
         ds.add_task("2026-04-29", "작업1")
         ds.add_task("2026-04-29", "작업2")
         ds.add_task("2026-04-29", "작업3")
         tasks = ds.fetch_tasks("2026-04-29")
-        # 작업2를 완료로
-        ds.toggle_task(tasks[1][0], True)
-        tasks = ds.fetch_tasks("2026-04-29")
-        # 미완료(작업1, 작업3)가 먼저, 완료(작업2)가 뒤
-        self.assertEqual(tasks[0][1], "작업1")
-        self.assertEqual(tasks[1][1], "작업3")
-        self.assertEqual(tasks[2][1], "작업2")
+        self.assertEqual(tasks[0]["title"], "작업1")
+        self.assertEqual(tasks[1]["title"], "작업2")
+        self.assertEqual(tasks[2]["title"], "작업3")
 
     def test_tasks_isolated_by_date(self):
         ds.add_task("2026-04-29", "오늘 할 일")
         ds.add_task("2026-04-30", "내일 할 일")
         self.assertEqual(len(ds.fetch_tasks("2026-04-29")), 1)
         self.assertEqual(len(ds.fetch_tasks("2026-04-30")), 1)
-        self.assertEqual(ds.fetch_tasks("2026-04-29")[0][1], "오늘 할 일")
+        self.assertEqual(ds.fetch_tasks("2026-04-29")[0]["title"], "오늘 할 일")
+
+    def test_update_task_title(self):
+        ds.add_task("2026-04-29", "원래 제목")
+        tasks = ds.fetch_tasks("2026-04-29")
+        tid = tasks[0]["id"]
+        ds.update_task_title(tid, "수정된 제목")
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(tasks[0]["title"], "수정된 제목")
+
+    def test_reorder_task(self):
+        ds.add_task("2026-04-29", "작업A")
+        ds.add_task("2026-04-29", "작업B")
+        tasks = ds.fetch_tasks("2026-04-29")
+        # B를 앞으로
+        ds.reorder_task(tasks[1]["id"], -1)
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(tasks[0]["title"], "작업B")
+        self.assertEqual(tasks[1]["title"], "작업A")
+
+
+# ────────────────────────────────────────────────
+# 2-1. 하위 태스크 (트리) 테스트
+# ────────────────────────────────────────────────
+class TestSubTasks(BaseDBTestCase):
+
+    def test_add_child_task(self):
+        ds.add_task("2026-04-29", "부모 작업")
+        parent = ds.fetch_tasks("2026-04-29")[0]
+        ds.add_task("2026-04-29", "자식 작업1", parent_id=parent["id"])
+        ds.add_task("2026-04-29", "자식 작업2", parent_id=parent["id"])
+
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(len(tasks), 1)  # 부모만 top-level
+        self.assertEqual(len(tasks[0]["children"]), 2)
+        self.assertEqual(tasks[0]["children"][0]["title"], "자식 작업1")
+        self.assertEqual(tasks[0]["children"][1]["title"], "자식 작업2")
+
+    def test_toggle_parent_completes_children(self):
+        ds.add_task("2026-04-29", "부모")
+        parent = ds.fetch_tasks("2026-04-29")[0]
+        ds.add_task("2026-04-29", "자식1", parent_id=parent["id"])
+        ds.add_task("2026-04-29", "자식2", parent_id=parent["id"])
+
+        ds.toggle_task(parent["id"], True)
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(tasks[0]["done"], 1)
+        for child in tasks[0]["children"]:
+            self.assertEqual(child["done"], 1)
+
+    def test_delete_parent_deletes_children(self):
+        ds.add_task("2026-04-29", "부모")
+        parent = ds.fetch_tasks("2026-04-29")[0]
+        ds.add_task("2026-04-29", "자식", parent_id=parent["id"])
+
+        ds.delete_task(parent["id"])
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(len(tasks), 0)
+
+    def test_multiple_children_no_limit(self):
+        ds.add_task("2026-04-29", "부모")
+        parent = ds.fetch_tasks("2026-04-29")[0]
+        for i in range(10):
+            ds.add_task("2026-04-29", f"자식{i}", parent_id=parent["id"])
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(len(tasks[0]["children"]), 10)
+
+    def test_fetch_tasks_flat_compat(self):
+        """fetch_tasks_flat은 하위호환 (id, title, done) 튜플 반환"""
+        ds.add_task("2026-04-29", "작업1")
+        flat = ds.fetch_tasks_flat("2026-04-29")
+        self.assertIsInstance(flat[0], tuple)
+        self.assertEqual(flat[0][1], "작업1")
+
+    def test_reparent_task_to_child(self):
+        """드래그로 태스크를 다른 태스크의 자식으로 이동"""
+        ds.add_task("2026-04-29", "부모될작업")
+        ds.add_task("2026-04-29", "자식될작업")
+        tasks = ds.fetch_tasks("2026-04-29")
+        parent_id = tasks[0]["id"]
+        child_id = tasks[1]["id"]
+
+        result = ds.reparent_task(child_id, parent_id)
+        self.assertTrue(result)
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(tasks[0]["children"]), 1)
+        self.assertEqual(tasks[0]["children"][0]["title"], "자식될작업")
+
+    def test_reparent_task_to_toplevel(self):
+        """자식을 최상위로 승격"""
+        ds.add_task("2026-04-29", "부모")
+        parent = ds.fetch_tasks("2026-04-29")[0]
+        ds.add_task("2026-04-29", "자식", parent_id=parent["id"])
+        child_id = ds.fetch_tasks("2026-04-29")[0]["children"][0]["id"]
+
+        result = ds.reparent_task(child_id, None)
+        self.assertTrue(result)
+        tasks = ds.fetch_tasks("2026-04-29")
+        self.assertEqual(len(tasks), 2)
+
+    def test_reparent_blocked_if_has_children(self):
+        """자식이 있는 태스크는 다른 태스크의 자식이 될 수 없음 (1뎁스 제한)"""
+        ds.add_task("2026-04-29", "A")
+        ds.add_task("2026-04-29", "B")
+        tasks = ds.fetch_tasks("2026-04-29")
+        a_id = tasks[0]["id"]
+        b_id = tasks[1]["id"]
+        ds.add_task("2026-04-29", "B의자식", parent_id=b_id)
+
+        result = ds.reparent_task(b_id, a_id)
+        self.assertFalse(result)  # B는 자식이 있으므로 거부
 
 
 # ────────────────────────────────────────────────
@@ -177,14 +284,14 @@ class TestCarryOver(BaseDBTestCase):
 
         # 오늘 날짜에 이월된 작업 확인
         tasks = ds.fetch_tasks("2026-04-29")
-        titles = [t[1] for t in tasks]
+        titles = [t["title"] for t in tasks]
         self.assertIn("미완료 작업1", titles)
         self.assertIn("미완료 작업2", titles)
 
     def test_carry_over_skips_completed_tasks(self):
         ds.add_task("2026-04-28", "완료된 작업")
         tasks = ds.fetch_tasks("2026-04-28")
-        ds.toggle_task(tasks[0][0], True)
+        ds.toggle_task(tasks[0]["id"], True)
 
         count = ds.carry_over_tasks("2026-04-29")
         self.assertEqual(count, 0)
@@ -299,7 +406,7 @@ class TestKoreanText(BaseDBTestCase):
     def test_korean_task_roundtrip(self):
         ds.add_task("2026-04-29", "한글 작업 테스트")
         tasks = ds.fetch_tasks("2026-04-29")
-        self.assertEqual(tasks[0][1], "한글 작업 테스트")
+        self.assertEqual(tasks[0]["title"], "한글 작업 테스트")
 
     def test_korean_note_roundtrip(self):
         content = "가나다라마바사 아자차카타파하"
@@ -315,7 +422,7 @@ class TestKoreanText(BaseDBTestCase):
     def test_mixed_korean_english(self):
         ds.add_task("2026-04-29", "회의 at 3pm 준비")
         tasks = ds.fetch_tasks("2026-04-29")
-        self.assertEqual(tasks[0][1], "회의 at 3pm 준비")
+        self.assertEqual(tasks[0]["title"], "회의 at 3pm 준비")
 
     def test_korean_emoji_mixed(self):
         content = "오늘 할 일 완료! 🎉✅"
