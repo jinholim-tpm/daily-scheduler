@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QSlider, QScrollArea,
     QFrame, QFileDialog, QMessageBox, QDialog,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut, QKeySequence
 
 # ────────────────────────────────────────────────
@@ -649,14 +649,14 @@ class SchedulerApp(QMainWindow):
 
         # 초기 텍스트
         self._apply_lang_texts()
-        QTimer.singleShot(300, self._fix_translatable_widths)
+        self._fix_translatable_widths()
 
     # ── 번역 위젯 고정 너비 ─────────────────────
     def _fix_translatable_widths(self):
-        """모든 언어 텍스트 중 가장 긴 것에 맞춰 위젯 고정 너비 설정 (레이아웃 안정화)
-        QTimer 300ms 후 실행 → 폰트 stylesheet가 완전히 적용된 뒤 fontMetrics() 사용.
-        date_label/today_badge는 크기 변동이 작아 overflow 방지를 위해 고정 너비 미적용.
+        """모든 언어 텍스트 중 가장 긴 글자수 기준으로 위젯 고정 너비 설정 (레이아웃 안정화)
+        CJK 문자는 2칸, 그 외는 1칸으로 계산하여 고정 너비를 부여한다.
         """
+        CHAR_PX = 7  # 11px 폰트 기준 영문 1글자 폭
         for widget, key, pad in [
             (self.tasks_title,   "tasks",   8),
             (self.notes_title,   "notes",   8),
@@ -665,9 +665,11 @@ class SchedulerApp(QMainWindow):
             (self.save_btn,      "save",    16),
             (self.go_today_btn,  "go_today", 16),
         ]:
-            fm = widget.fontMetrics()
-            max_w = max(fm.horizontalAdvance(lang[key]) for lang in I18N.values())
-            widget.setFixedWidth(max_w + pad)
+            max_units = max(
+                sum(2 if ord(ch) > 0x2E7F else 1 for ch in lang[key])
+                for lang in I18N.values()
+            )
+            widget.setFixedWidth(max_units * CHAR_PX + pad)
 
     # ── 다국어 텍스트 적용 ───────────────────────
     def _apply_lang_texts(self):
@@ -778,6 +780,7 @@ class SchedulerApp(QMainWindow):
                                           index=j, total=len(task["children"]))
                 # 하위 태스크 추가 버튼
                 add_child_row = QWidget()
+                add_child_row.setProperty("drop_parent_id", task["id"])
                 add_child_row.setFixedHeight(26)
                 acr_layout = QHBoxLayout(add_child_row)
                 acr_layout.setContentsMargins(48, 0, 18, 0)
@@ -823,7 +826,7 @@ class SchedulerApp(QMainWindow):
             f"border: none; color: {C['dim3']}; font-size: 16px; font-weight: bold; padding: 0;"
         )
         drag_handle.setCursor(Qt.CursorShape.OpenHandCursor)
-        drag_handle.mousePressEvent = lambda e, t=tid, idx=index: self._drag_start(t, idx, e)
+        drag_handle.mousePressEvent = lambda e, t=tid, idx=index, h=drag_handle: self._drag_start(t, idx, e, h)
         drag_handle.mouseMoveEvent = lambda e, t=tid, idx=index, tot=total, pid=parent_id: \
             self._drag_move(t, idx, tot, pid, e)
         drag_handle.mouseReleaseEvent = lambda e: self._drag_end(e)
@@ -913,7 +916,73 @@ class SchedulerApp(QMainWindow):
         self._auto_edit_tid = None
 
     # ── 드래그 앤 드롭 (순서 변경 + 부모 변경) ──────
-    def _drag_start(self, tid, index, event):
+    def _find_task_at_pos(self, global_pos):
+        """커서 위치에 있는 태스크의 (위젯, task_id) 반환"""
+        for i in range(self.task_list_layout.count()):
+            w = self.task_list_layout.itemAt(i).widget()
+            if w and w.property("task_id") is not None:
+                top = w.mapToGlobal(w.rect().topLeft()).y()
+                bottom = w.mapToGlobal(w.rect().bottomRight()).y()
+                if top <= global_pos.y() <= bottom:
+                    return w, w.property("task_id")
+        return None, None
+
+    def _find_dropzone_at_pos(self, global_pos):
+        """커서 위치에 있는 드롭존(+ 하위 항목)의 (위젯, parent_id) 반환"""
+        for i in range(self.task_list_layout.count()):
+            w = self.task_list_layout.itemAt(i).widget()
+            if w and w.property("drop_parent_id") is not None:
+                top = w.mapToGlobal(w.rect().topLeft()).y()
+                bottom = w.mapToGlobal(w.rect().bottomRight()).y()
+                if top <= global_pos.y() <= bottom:
+                    return w, w.property("drop_parent_id")
+        return None, None
+
+    def _find_dropzone_for_parent(self, parent_id):
+        """특정 부모의 드롭존 위젯 반환"""
+        for i in range(self.task_list_layout.count()):
+            w = self.task_list_layout.itemAt(i).widget()
+            if w and w.property("drop_parent_id") == parent_id:
+                return w
+        return None
+
+    def _reorder_by_y(self, parent_id, tid, global_y):
+        """Y 위치 기반으로 형제들 사이에서 삽입 순서 결정"""
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE date = ? AND parent_id IS ? ORDER BY sort_order, id",
+                (self.current_date, parent_id),
+            ).fetchall()
+        ids = [r[0] for r in rows if r[0] != tid]
+
+        insert_idx = len(ids)
+        for idx, sid in enumerate(ids):
+            for i in range(self.task_list_layout.count()):
+                w = self.task_list_layout.itemAt(i).widget()
+                if w and w.property("task_id") == sid:
+                    if global_y < w.mapToGlobal(w.rect().center()).y():
+                        insert_idx = idx
+                    break
+            if insert_idx < len(ids):
+                break
+
+        ids.insert(insert_idx, tid)
+        for order, task_id in enumerate(ids):
+            reorder_task(task_id, order)
+
+    def _clear_drag_highlight(self):
+        if hasattr(self, '_drag_highlight') and self._drag_highlight:
+            self._drag_highlight.setStyleSheet(
+                f"QWidget {{ background: transparent; }} QWidget:hover {{ background: {C['hover']}; }}"
+            )
+            self._drag_highlight = None
+
+    def _drag_start(self, tid, index, event, handle=None):
+        # 마우스 캡처 — 핸들 바깥에서도 move/release 이벤트 수신
+        if handle:
+            handle.grabMouse()
+            self._drag_handle = handle
+
         # 원본 행 찾기
         source_row = None
         for i in range(self.task_list_layout.count()):
@@ -936,6 +1005,7 @@ class SchedulerApp(QMainWindow):
             "start_y": event.globalPosition().y(),
             "parent_id": cur_parent_id,
         }
+        self._drag_highlight = None
 
         # 원본 행 흐리게
         if source_row:
@@ -960,10 +1030,52 @@ class SchedulerApp(QMainWindow):
     def _drag_move(self, tid, index, total, parent_id, event):
         if not self._drag_source or self._drag_source["tid"] != tid:
             return
+        global_pos = event.globalPosition().toPoint()
+        dx = event.globalPosition().x() - self._drag_source["start_x"]
+
         # 플로팅 위젯을 마우스 따라 이동
         if hasattr(self, '_drag_widget') and self._drag_widget:
-            local_pos = self.mapFromGlobal(event.globalPosition().toPoint())
+            local_pos = self.mapFromGlobal(global_pos)
             self._drag_widget.move(local_pos.x() - 20, local_pos.y() - 19)
+
+        # 시각적 피드백
+        self._clear_drag_highlight()
+        indent_threshold = 50
+        color = C['border']
+
+        # 드롭존 하이라이트: 드롭존 위에 있거나, 태스크 위에서 오른쪽 드래그 시 해당 드롭존만 표시
+        dz_w, dz_pid = self._find_dropzone_at_pos(global_pos)
+        if dz_w and dz_pid != tid:
+            color = C['blue']
+            dz_w.setStyleSheet(
+                f"QWidget {{ background: rgba(144, 205, 244, 0.15); border-left: 3px solid {C['blue']}; }}"
+            )
+            self._drag_highlight = dz_w
+        elif dx > indent_threshold:
+            _, target_tid = self._find_task_at_pos(global_pos)
+            if target_tid and target_tid != tid:
+                dz = self._find_dropzone_for_parent(target_tid)
+                if not dz:
+                    # 타겟이 자식이면 부모의 드롭존 찾기
+                    with get_conn() as conn:
+                        row = conn.execute("SELECT parent_id FROM tasks WHERE id = ?", (target_tid,)).fetchone()
+                    if row and row[0] is not None:
+                        dz = self._find_dropzone_for_parent(row[0])
+                if dz:
+                    color = C['blue']
+                    dz.setStyleSheet(
+                        f"QWidget {{ background: rgba(144, 205, 244, 0.15); border-left: 3px solid {C['blue']}; }}"
+                    )
+                    self._drag_highlight = dz
+        elif dx < -indent_threshold and self._drag_source.get("parent_id") is not None:
+            color = C['amber']
+
+        if self._drag_widget:
+            self._drag_widget.setStyleSheet(
+                f"background: {C['surface_strong']}; color: {C['text']}; "
+                f"border: 2px solid {color}; border-radius: 6px; "
+                f"padding: 8px 14px; font-size: 13px;"
+            )
 
     def _drag_end(self, event):
         if not self._drag_source:
@@ -971,15 +1083,30 @@ class SchedulerApp(QMainWindow):
         source = self._drag_source
         self._drag_source = None
 
-        # 플로팅 위젯 제거
+        # 마우스 캡처 해제
+        if hasattr(self, '_drag_handle') and self._drag_handle:
+            self._drag_handle.releaseMouse()
+            self._drag_handle = None
+
+        # 플로팅 위젯 및 하이라이트 제거
         if hasattr(self, '_drag_widget') and self._drag_widget:
             self._drag_widget.deleteLater()
             self._drag_widget = None
+        self._clear_drag_highlight()
 
         tid = source["tid"]
         parent_id = source.get("parent_id")
+        global_pos = event.globalPosition().toPoint()
         dx = event.globalPosition().x() - source["start_x"]
         dy = event.globalPosition().y() - source["start_y"]
+
+        # 드롭존(+ 하위 항목)에 놓으면 최우선 처리
+        _, dz_pid = self._find_dropzone_at_pos(global_pos)
+        if dz_pid is not None and dz_pid != tid:
+            reparent_task(tid, dz_pid)
+            self._reorder_by_y(dz_pid, tid, global_pos.y())
+            self._refresh_tasks()
+            return
 
         indent_threshold = 50
         row_height = 40
@@ -994,36 +1121,23 @@ class SchedulerApp(QMainWindow):
             action = "reorder"
 
         if action == "indent":
-            tasks = fetch_tasks(self.current_date)
-            prev_parent = None
-            for p in tasks:
-                if p["id"] == tid:
-                    break
-                prev_parent = p
-            if prev_parent and parent_id is None:
-                reparent_task(tid, prev_parent["id"])
+            _, target_tid = self._find_task_at_pos(global_pos)
+            if target_tid and target_tid != tid:
+                # 타겟이 자식이면 부모로 변환
+                with get_conn() as conn:
+                    row = conn.execute("SELECT parent_id FROM tasks WHERE id = ?", (target_tid,)).fetchone()
+                if row and row[0] is not None:
+                    target_tid = row[0]
+                reparent_task(tid, target_tid)
+                self._reorder_by_y(target_tid, tid, global_pos.y())
 
         elif action == "outdent":
             if parent_id is not None:
                 reparent_task(tid, None)
+                self._reorder_by_y(None, tid, global_pos.y())
 
         elif action == "reorder":
-            steps = int(dy / row_height)
-            with get_conn() as conn:
-                siblings = conn.execute(
-                    "SELECT id FROM tasks WHERE date = ? AND parent_id IS ? ORDER BY sort_order, id",
-                    (self.current_date, parent_id),
-                ).fetchall()
-            ids = [r[0] for r in siblings]
-            if tid in ids:
-                old_pos = ids.index(tid)
-                new_index = max(0, min(len(ids) - 1, old_pos + steps))
-                if new_index != old_pos:
-                    ids.pop(old_pos)
-                    ids.insert(new_index, tid)
-                    for order, task_id in enumerate(ids):
-                        reorder_task(task_id, order)
-                    action = "done"
+            self._reorder_by_y(parent_id, tid, global_pos.y())
 
         if action:
             self._refresh_tasks()
