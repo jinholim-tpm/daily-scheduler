@@ -33,7 +33,8 @@ I18N = {
         "opacity": "투명도",
         "today": "오늘",
         "yesterday": "어제",
-        "go_today": "↩ 오늘",
+        "tomorrow": "내일",
+
         "add_placeholder": "새로운 할 일을 입력하세요...",
         "no_tasks": "할 일이 없습니다",
         "no_tasks_hint": "위 입력창에서 추가해보세요",
@@ -61,7 +62,8 @@ I18N = {
         "opacity": "Opacity",
         "today": "Today",
         "yesterday": "Yesterday",
-        "go_today": "↩ Today",
+        "tomorrow": "Tomorrow",
+
         "add_placeholder": "Add a new task...",
         "no_tasks": "No tasks yet",
         "no_tasks_hint": "Add one above to get started",
@@ -445,8 +447,14 @@ class SchedulerApp(QMainWindow):
         tb_layout.setContentsMargins(24, 8, 8, 8)
         tb_layout.setSpacing(0)
 
+        # 홈(오늘) 버튼 — 오늘 날짜 숫자 표시
+        self.home_btn = QPushButton(str(date.today().day))
+        self.home_btn.setFixedSize(30, 30)
+        self.home_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.home_btn.clicked.connect(self.go_today)
+
         # 날짜 네비게이션
-        self.prev_btn = QPushButton("<")
+        self.prev_btn = QPushButton("◀")
         self.prev_btn.setFixedSize(30, 30)
         self.prev_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; border: none; color: {C['dim2']};")
         self.prev_btn.clicked.connect(self.prev_day)
@@ -454,7 +462,7 @@ class SchedulerApp(QMainWindow):
         self.date_label = QLabel()
         self.date_label.setStyleSheet(f"color: {C['text']}; font-size: 15px; font-weight: bold;")
 
-        self.next_btn = QPushButton(">")
+        self.next_btn = QPushButton("▶")
         self.next_btn.setFixedSize(30, 30)
         self.next_btn.setStyleSheet(f"font-weight: bold; font-size: 14px; border: none; color: {C['dim2']};")
         self.next_btn.clicked.connect(self.next_day)
@@ -462,12 +470,8 @@ class SchedulerApp(QMainWindow):
         self.today_badge = QLabel()
         self.today_badge.setStyleSheet(f"color: {C['blue']}; font-size: 11px;")
 
-        self.go_today_btn = QPushButton("↩ 오늘")
-        self.go_today_btn.setStyleSheet(f"border: none; color: {C['dim3']}; font-size: 11px;")
-        self.go_today_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.go_today_btn.clicked.connect(self.go_today)
-        self.go_today_btn.hide()
-
+        tb_layout.addWidget(self.home_btn)
+        tb_layout.addSpacing(8)
         tb_layout.addWidget(self.prev_btn)
         tb_layout.addSpacing(6)
         tb_layout.addWidget(self.date_label)
@@ -475,8 +479,6 @@ class SchedulerApp(QMainWindow):
         tb_layout.addWidget(self.next_btn)
         tb_layout.addSpacing(10)
         tb_layout.addWidget(self.today_badge)
-        tb_layout.addSpacing(8)
-        tb_layout.addWidget(self.go_today_btn)
         tb_layout.addStretch()
 
         # 오른쪽 컨트롤 — 언어 토글
@@ -663,7 +665,6 @@ class SchedulerApp(QMainWindow):
             (self.opacity_title, "opacity", 8),
             (self.hist_btn,      "history", 32),
             (self.save_btn,      "save",    16),
-            (self.go_today_btn,  "go_today", 16),
         ]:
             max_units = max(
                 sum(2 if ord(ch) > 0x2E7F else 1 for ch in lang[key])
@@ -685,7 +686,7 @@ class SchedulerApp(QMainWindow):
         self.lang_ko_btn.setStyleSheet(active if self.lang == "ko" else inactive)
         self.lang_en_btn.setStyleSheet(active if self.lang == "en" else inactive)
         self.task_entry.setPlaceholderText(self._tx("add_placeholder"))
-        self.go_today_btn.setText(self._tx("go_today"))
+
 
     def _set_lang(self, lang):
         if self.lang == lang:
@@ -711,17 +712,39 @@ class SchedulerApp(QMainWindow):
     def _update_date_label(self):
         d = datetime.strptime(self.current_date, "%Y-%m-%d").date()
         wd = self.t["weekdays"][d.weekday()]
-        self.date_label.setText(f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})")
+        if self.lang == "en":
+            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            self.date_label.setText(f"{months[d.month - 1]} {d.day}, {d.year}  ({wd})")
+        else:
+            self.date_label.setText(f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})")
 
         delta = (d - date.today()).days
+        # 홈 버튼: 오늘이면 dim, 다른 날이면 활성화
+        if delta == 0:
+            self.home_btn.setStyleSheet(
+                f"QPushButton {{ border: 2px solid {C['dim3']}; border-radius: 6px; "
+                f"color: {C['dim3']}; font-size: 13px; font-weight: bold; padding: 0; background: transparent; }}"
+            )
+        else:
+            self.home_btn.setStyleSheet(
+                f"QPushButton {{ border: 2px solid {C['blue']}; border-radius: 6px; "
+                f"color: {C['blue']}; font-size: 13px; font-weight: bold; padding: 0; background: transparent; }}"
+                f"QPushButton:hover {{ background: {C['blue']}; color: {C['bg']}; }}"
+            )
+
         if delta == 0:
             self.today_badge.setText(self._tx("today"))
             self.today_badge.setStyleSheet(f"color: {C['blue']}; font-size: 11px;")
-            self.go_today_btn.hide()
+
         elif delta == -1:
             self.today_badge.setText(self._tx("yesterday"))
             self.today_badge.setStyleSheet(f"color: {C['amber']}; font-size: 11px;")
-            self.go_today_btn.show()
+
+        elif delta == 1:
+            self.today_badge.setText(self._tx("tomorrow"))
+            self.today_badge.setStyleSheet(f"color: {C['teal']}; font-size: 11px;")
+
         elif delta < 0:
             n = abs(delta)
             if n >= 14:
@@ -730,7 +753,7 @@ class SchedulerApp(QMainWindow):
                 label = f"{n}{self._tx('days_ago')}"
             self.today_badge.setText(label)
             self.today_badge.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
-            self.go_today_btn.show()
+
         else:
             n = delta
             if n >= 14:
@@ -739,7 +762,7 @@ class SchedulerApp(QMainWindow):
                 label = f"{n}{self._tx('days_later')}"
             self.today_badge.setText(label)
             self.today_badge.setStyleSheet(f"color: {C['dim2']}; font-size: 11px;")
-            self.go_today_btn.show()
+
 
     def _refresh_tasks(self):
         # 기존 위젯 제거
@@ -1253,17 +1276,35 @@ class SchedulerApp(QMainWindow):
         for i, d_str in enumerate(dates):
             d = datetime.strptime(d_str, "%Y-%m-%d").date()
             wd = self.t["weekdays"][d.weekday()]
-            label_text = f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})"
+            if self.lang == "en":
+                months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                date_text = f"{months[d.month - 1]} {d.day}, {d.year}  ({wd})"
+            else:
+                date_text = f"{d.year}. {d.month:02d}. {d.day:02d}  ({wd})"
 
-            row = QPushButton(label_text)
-            row.setStyleSheet(f"""
-                QPushButton {{
-                    text-align: left; border: none; padding: 10px 18px;
-                    color: {C['dim1']}; font-size: 13px;
-                }}
-                QPushButton:hover {{ background: {C['hover']}; }}
-            """)
+            # 태스크 통계
+            tasks = fetch_tasks_flat(d_str)
+            total = len(tasks)
+            done = sum(1 for _, _, dn in tasks if dn)
+
+            row = QWidget()
             row.setCursor(Qt.CursorShape.PointingHandCursor)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(18, 10, 18, 10)
+
+            date_lbl = QLabel(date_text)
+            date_lbl.setStyleSheet(f"color: {C['dim1']}; font-size: 13px;")
+
+            stat_lbl = QLabel(f"{done}/{total}" if total > 0 else "")
+            stat_color = C['green'] if total > 0 and done == total else C['dim3']
+            stat_lbl.setStyleSheet(f"color: {stat_color}; font-size: 11px;")
+
+            row_layout.addWidget(date_lbl)
+            row_layout.addStretch()
+            row_layout.addWidget(stat_lbl)
+
+            row.setStyleSheet(f"QWidget:hover {{ background: {C['hover']}; }}")
 
             def make_jump(idx):
                 def jump():
@@ -1273,7 +1314,7 @@ class SchedulerApp(QMainWindow):
                     dlg.close()
                 return jump
 
-            row.clicked.connect(make_jump(i))
+            row.mousePressEvent = lambda e, idx=i: make_jump(idx)()
             inner_layout.addWidget(row)
 
             if i < len(dates) - 1:
